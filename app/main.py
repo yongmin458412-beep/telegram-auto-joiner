@@ -1,4 +1,4 @@
-"""FastAPI 앱 (대시보드 + API)."""
+"""FastAPI 앱 — 다중 계정 워커 풀."""
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +14,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 
 from . import scheduler, storage
-from .telegram_client import disconnect_client, get_client
+from .telegram_client import disconnect_all, discover_accounts, get_client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,29 +44,39 @@ def auth(credentials: HTTPBasicCredentials = Depends(security)) -> str:
     return credentials.username
 
 
-_bg_task: asyncio.Task | None = None
+_worker_tasks: list[asyncio.Task] = []
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _bg_task
-    # 데이터 저장소 현재 상태 로깅
+    global _worker_tasks
+
+    # 저장소 진단 로그
     try:
         log.info("DATA_DIR=%s (abs=%s)", storage.DATA_DIR, storage.DATA_DIR.resolve())
         log.info("DATA_FILE=%s exists=%s", storage.DATA_FILE, storage.DATA_FILE.exists())
         log.info("SEED_FILE=%s exists=%s", storage.SEED_FILE, storage.SEED_FILE.exists())
         state_pre = storage.read_state()
-        pre_counts = {
+        counts = {
             "total": len(state_pre["groups"]),
             "pending": sum(1 for g in state_pre["groups"] if g["status"] == "pending"),
+            "processing": sum(1 for g in state_pre["groups"] if g["status"] == "processing"),
             "joined": sum(1 for g in state_pre["groups"] if g["status"] == "joined"),
             "failed": sum(1 for g in state_pre["groups"] if g["status"] == "failed"),
         }
-        log.info("Startup state: %s", pre_counts)
+        log.info("Startup state: %s", counts)
     except Exception as e:
         log.error("State inspect failed: %s", e)
 
-    # 시드 자동 주입 (groups가 비어있을 때만)
+    # stale processing → pending 으로 되돌림
+    try:
+        released = storage.release_stale_claims()
+        if released:
+            log.info("Released %d stale processing claims → pending.", released)
+    except Exception as e:
+        log.error("Release stale failed: %s", e)
+
+    # 시드 자동 주입
     try:
         state_now = storage.read_state()
         if state_now["groups"]:
@@ -82,21 +92,43 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.error("Seed loading failed: %s", e)
 
-    try:
-        await get_client()
-        log.info("Telegram client connected.")
-    except Exception as e:
-        log.error("Failed to connect Telegram client at startup: %s", e)
+    # 계정 발견
+    accounts = discover_accounts()
+    log.info("Discovered %d account(s): %s", len(accounts), [a[0] for a in accounts])
 
-    _bg_task = asyncio.create_task(scheduler.run_joiner_loop())
-    yield
-    scheduler.stop()
-    if _bg_task:
+    # 각 계정 클라이언트 연결 시도
+    connected = []
+    for name, _session in accounts:
         try:
-            await asyncio.wait_for(_bg_task, timeout=5)
-        except asyncio.TimeoutError:
-            _bg_task.cancel()
-    await disconnect_client()
+            await get_client(name)
+            log.info("[%s] Telegram client connected.", name)
+            connected.append(name)
+        except Exception as e:
+            log.error("[%s] Client connect failed: %s", name, e)
+
+    if not connected:
+        log.error("No Telegram clients connected. Workers will not start.")
+    else:
+        log.info(
+            "Starting %d worker(s). delay=%d-%ds, start_jitter=0-%ds",
+            len(connected),
+            scheduler.JOIN_DELAY_MIN,
+            scheduler.JOIN_DELAY_MAX,
+            scheduler.WORKER_START_JITTER_MAX,
+        )
+        for name in connected:
+            task = asyncio.create_task(scheduler.run_worker(name))
+            _worker_tasks.append(task)
+
+    yield
+
+    scheduler.stop()
+    for task in _worker_tasks:
+        try:
+            await asyncio.wait_for(task, timeout=5)
+        except (asyncio.TimeoutError, Exception):
+            task.cancel()
+    await disconnect_all()
 
 
 app = FastAPI(lifespan=lifespan, title="Telegram Auto Joiner")
@@ -105,30 +137,42 @@ app = FastAPI(lifespan=lifespan, title="Telegram Auto Joiner")
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request, _: str = Depends(auth)):
     state = storage.read_state()
-    # 상태별 개수
-    groups = list(reversed(state["groups"]))  # 최신 추가 위로
+    groups = list(reversed(state["groups"]))
     counts = {
         "pending": sum(1 for g in state["groups"] if g["status"] == "pending"),
+        "processing": sum(1 for g in state["groups"] if g["status"] == "processing"),
         "joined": sum(1 for g in state["groups"] if g["status"] == "joined"),
         "failed": sum(1 for g in state["groups"] if g["status"] == "failed"),
         "total": len(state["groups"]),
     }
-    fw_count = len(state["stats"].get("floodwait_events", []))
-    eff_limit = state["stats"].get("effective_daily_limit") or scheduler.DAILY_JOIN_LIMIT
+    # 계정별 유효 한도 계산
+    accounts_view = []
+    for name, acc in state["stats"]["accounts"].items():
+        eff = acc.get("effective_daily_limit")
+        accounts_view.append({
+            "name": name,
+            "joined_today": acc.get("joined_today", 0),
+            "joined_this_hour": acc.get("joined_this_hour", 0),
+            "effective_limit": eff,
+            "fw_count": len(acc.get("floodwait_events", [])),
+            "pause_until": acc.get("pause_until"),
+            "last_activity": acc.get("last_activity"),
+        })
+    accounts_view.sort(key=lambda a: a["name"])
+    global_fw = len(state["stats"].get("global_floodwait_events", []))
     return templates.TemplateResponse(
         "index.html",
         {
             "request": request,
-            "groups": groups[:200],  # 한번에 200개만 렌더 (성능)
+            "groups": groups[:200],
             "total_groups": counts["total"],
             "counts": counts,
-            "stats": state["stats"],
+            "accounts": accounts_view,
             "daily_limit": scheduler.DAILY_JOIN_LIMIT,
-            "effective_limit": eff_limit,
             "hourly_limit": scheduler.HOURLY_JOIN_LIMIT,
             "quiet_hours": scheduler.QUIET_HOURS_KST,
-            "floodwait_count": fw_count,
-            "pause_until": state["stats"].get("pause_until"),
+            "global_fw": global_fw,
+            "global_fw_threshold": scheduler.GLOBAL_FW_PAUSE_THRESHOLD,
         },
     )
 
@@ -140,7 +184,7 @@ async def add_group_route(link: str = Form(...), _: str = Depends(auth)):
         raise HTTPException(400, "link required")
     lines = [l.strip() for l in link.splitlines() if l.strip()]
     added, skipped = storage.add_groups_bulk(lines)
-    log.info("Added %d, skipped %d (duplicates/invalid).", added, skipped)
+    log.info("Added %d, skipped %d.", added, skipped)
     return RedirectResponse("/", status_code=303)
 
 

@@ -7,7 +7,7 @@
 <style>
   * { box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         max-width: 1080px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+         max-width: 1180px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
   h1 { margin-bottom: 0.25rem; }
   .sub { color: #666; margin-bottom: 1.5rem; }
   .card { background: #f7f7f9; border: 1px solid #e3e3e8; border-radius: 8px;
@@ -33,6 +33,7 @@
   .badge { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 12px;
            font-size: 0.72rem; font-weight: 600; color: #fff; }
   .badge.pending { background: #f0ad4e; }
+  .badge.processing { background: #17a2b8; }
   .badge.joined  { background: #28a745; }
   .badge.failed  { background: #d9534f; }
   .badge.skipped { background: #6c757d; }
@@ -45,51 +46,75 @@
   .stat.warn strong { color: #b8322f; }
   .meta { color: #666; font-size: 0.82rem; margin-top: 0.5rem; }
   .meta code { background: #eee; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.78rem; }
+  .workers { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem; }
+  .worker { background: #fff; border: 1px solid #e3e3e8; border-radius: 6px; padding: 0.75rem; }
+  .worker h3 { margin: 0 0 0.4rem 0; font-size: 0.95rem; }
+  .worker.paused { background: #fff3cd; }
+  .worker .row { font-size: 0.82rem; color: #555; margin: 0.15rem 0; }
+  .worker .row b { color: #1a1a1a; }
   .truncate-note { color: #888; font-size: 0.82rem; text-align: center; padding: 0.75rem; }
+  .worker-tag { display: inline-block; font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 8px;
+                background: #e9ecef; color: #495057; margin-left: 0.3rem; font-family: monospace; }
 </style>
 </head>
 <body>
 
-<h1>Telegram Auto Joiner</h1>
-<div class="sub">초대 링크를 등록하면 자동으로 그룹에 입장합니다. FloodWait 방지 안전 모드.</div>
+<h1>Telegram Auto Joiner <span style="font-size:0.9rem;color:#666;">({{ accounts|length }} accounts)</span></h1>
+<div class="sub">다중 계정 워커 풀 · 공유 큐 · 자동 FloodWait 스로틀</div>
 
-{% if pause_until %}
+{% if global_fw >= global_fw_threshold %}
 <div class="card warn">
-  ⚠️ FloodWait 누적으로 <strong>{{ pause_until[:19].replace('T',' ') }} UTC</strong> 까지 일시정지 중.
+  ⚠️ 전역 FloodWait 한도({{ global_fw_threshold }}) 초과. 모든 워커가 1시간 일시정지 중.
 </div>
 {% endif %}
 
 <div class="card">
-  <div class="stat">오늘 입장: <strong>{{ stats.joined_today }}</strong>
-    {% if effective_limit == -1 %} / ∞{% elif effective_limit == 0 %} / <span class="err">일시정지</span>{% else %} / {{ effective_limit }}{% endif %}
-    {% if effective_limit != -1 and effective_limit != daily_limit and daily_limit == 0 %}<span class="err">(스로틀)</span>{% endif %}
-  </div>
-  <div class="stat">시간당: <strong>{{ stats.joined_this_hour }}</strong>{% if hourly_limit > 0 %} / {{ hourly_limit }}{% else %} / ∞{% endif %}</div>
   <div class="stat">전체: <strong>{{ counts.total }}</strong></div>
   <div class="stat">대기: <strong>{{ counts.pending }}</strong></div>
+  <div class="stat">처리중: <strong>{{ counts.processing }}</strong></div>
   <div class="stat">성공: <strong>{{ counts.joined }}</strong></div>
   <div class="stat">실패: <strong>{{ counts.failed }}</strong></div>
-  <div class="stat {% if floodwait_count > 0 %}warn{% endif %}">
-    24h FloodWait: <strong>{{ floodwait_count }}</strong>
+  <div class="stat {% if global_fw > 0 %}warn{% endif %}">
+    24h 전체 FW: <strong>{{ global_fw }}</strong> / {{ global_fw_threshold }}
   </div>
-  <div class="meta">
-    Quiet hours (KST): <code>{% if quiet_hours %}{{ quiet_hours }}{% else %}off{% endif %}</code>
+  <div class="meta">Quiet hours (KST): <code>{% if quiet_hours %}{{ quiet_hours }}{% else %}off{% endif %}</code></div>
+</div>
+
+{% if accounts %}
+<div class="card">
+  <h2 style="margin-top:0;font-size:1.1rem;">계정별 상태</h2>
+  <div class="workers">
+    {% for a in accounts %}
+    <div class="worker {% if a.pause_until %}paused{% endif %}">
+      <h3>#{{ a.name }}{% if a.pause_until %} ⏸{% endif %}</h3>
+      <div class="row">오늘: <b>{{ a.joined_today }}</b>
+        {% if a.effective_limit == -1 %}/ ∞
+        {% elif a.effective_limit == 0 %}/ <span class="err">정지</span>
+        {% elif a.effective_limit is not none %}/ {{ a.effective_limit }}
+        {% endif %}
+      </div>
+      <div class="row">시간: <b>{{ a.joined_this_hour }}</b>{% if hourly_limit > 0 %} / {{ hourly_limit }}{% endif %}</div>
+      <div class="row {% if a.fw_count > 0 %}err{% endif %}">FW(24h): <b>{{ a.fw_count }}</b></div>
+      {% if a.last_activity %}
+      <div class="row" style="color:#888;font-size:0.75rem;">{{ a.last_activity[:19].replace('T',' ') }}</div>
+      {% endif %}
+    </div>
+    {% endfor %}
   </div>
 </div>
+{% endif %}
 
 <div class="card">
   <form class="add" action="/groups" method="post">
     <label><b>그룹 링크 추가</b> (한 줄에 하나씩, 자동 중복 제거)</label>
     <textarea name="link" placeholder="https://t.me/+abcdefg&#10;@group_username&#10;https://t.me/joinchat/xxxxx"></textarea>
-    <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
-      <button type="submit">추가</button>
-    </div>
+    <div><button type="submit">추가</button></div>
   </form>
   <div class="meta" style="margin-top:1rem; border-top:1px solid #e3e3e8; padding-top:0.75rem;">
     <form class="inline" action="/groups/import-seed" method="post">
       <button type="submit" class="ghost">시드 파일 다시 불러오기</button>
     </form>
-    <span style="margin-left:0.5rem;">— <code>data/seed_links.txt</code> 에서 새 링크만 추가합니다.</span>
+    <span style="margin-left:0.5rem;">— <code>seed_links.txt</code> 에서 새 링크만 추가합니다.</span>
   </div>
 </div>
 
@@ -103,7 +128,11 @@
     <tbody>
       {% for g in groups %}
       <tr>
-        <td><span class="badge {{ g.status }}">{{ g.status }}</span></td>
+        <td>
+          <span class="badge {{ g.status }}">{{ g.status }}</span>
+          {% if g.worker %}<span class="worker-tag">#{{ g.worker }}</span>{% endif %}
+          {% if g.claimed_by and g.status == 'processing' %}<span class="worker-tag">→#{{ g.claimed_by }}</span>{% endif %}
+        </td>
         <td>
           <div class="link-cell">{{ g.link }}</div>
           {% if g.title %}<div class="title">{{ g.title }}</div>{% endif %}
@@ -112,13 +141,12 @@
         <td>{{ g.added_at[:19].replace('T',' ') }}</td>
         <td>{{ (g.joined_at or '-')[:19].replace('T',' ') if g.joined_at else '-' }}</td>
         <td class="actions">
-          {% if g.status != 'pending' %}
+          {% if g.status != 'pending' and g.status != 'processing' %}
           <form action="/groups/{{ g.id }}/retry" method="post">
             <button type="submit" class="neutral">재시도</button>
           </form>
           {% endif %}
-          <form action="/groups/{{ g.id }}/delete" method="post"
-                onsubmit="return confirm('삭제하시겠어요?');">
+          <form action="/groups/{{ g.id }}/delete" method="post" onsubmit="return confirm('삭제하시겠어요?');">
             <button type="submit" class="danger">삭제</button>
           </form>
         </td>
