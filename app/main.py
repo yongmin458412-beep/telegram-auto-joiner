@@ -50,11 +50,28 @@ _bg_task: asyncio.Task | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _bg_task
+    # 데이터 저장소 현재 상태 로깅
+    try:
+        log.info("DATA_DIR=%s (abs=%s)", storage.DATA_DIR, storage.DATA_DIR.resolve())
+        log.info("DATA_FILE=%s exists=%s", storage.DATA_FILE, storage.DATA_FILE.exists())
+        state_pre = storage.read_state()
+        pre_counts = {
+            "total": len(state_pre["groups"]),
+            "pending": sum(1 for g in state_pre["groups"] if g["status"] == "pending"),
+            "joined": sum(1 for g in state_pre["groups"] if g["status"] == "joined"),
+            "failed": sum(1 for g in state_pre["groups"] if g["status"] == "failed"),
+        }
+        log.info("Startup state: %s", pre_counts)
+    except Exception as e:
+        log.error("State inspect failed: %s", e)
+
     # 시드 자동 주입 (groups가 비어있을 때만)
     try:
         added = storage.seed_if_empty()
         if added:
             log.info("Seeded %d groups from data/seed_links.txt", added)
+        else:
+            log.info("Seed skipped (groups already exist).")
     except Exception as e:
         log.error("Seed loading failed: %s", e)
 
