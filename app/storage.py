@@ -13,7 +13,8 @@ from typing import Any, Optional
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
 DATA_FILE = DATA_DIR / "groups.json"
-SEED_FILE = Path("data/seed_links.txt")  # repo 내 번들
+# 시드 파일은 Volume 마운트 경로(/app/data) 밖에 둬야 마운트로 가려지지 않음
+SEED_FILE = Path(os.environ.get("SEED_FILE", "seed_links.txt"))
 
 _lock = threading.Lock()
 

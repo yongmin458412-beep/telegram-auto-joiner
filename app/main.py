@@ -54,6 +54,7 @@ async def lifespan(app: FastAPI):
     try:
         log.info("DATA_DIR=%s (abs=%s)", storage.DATA_DIR, storage.DATA_DIR.resolve())
         log.info("DATA_FILE=%s exists=%s", storage.DATA_FILE, storage.DATA_FILE.exists())
+        log.info("SEED_FILE=%s exists=%s", storage.SEED_FILE, storage.SEED_FILE.exists())
         state_pre = storage.read_state()
         pre_counts = {
             "total": len(state_pre["groups"]),
@@ -67,11 +68,17 @@ async def lifespan(app: FastAPI):
 
     # 시드 자동 주입 (groups가 비어있을 때만)
     try:
-        added = storage.seed_if_empty()
-        if added:
-            log.info("Seeded %d groups from data/seed_links.txt", added)
+        state_now = storage.read_state()
+        if state_now["groups"]:
+            log.info("Seed skipped: %d groups already present.", len(state_now["groups"]))
         else:
-            log.info("Seed skipped (groups already exist).")
+            links = storage.load_seed_links()
+            log.info("Seed file loaded: %d unique links.", len(links))
+            if links:
+                added, _ = storage.add_groups_bulk(links)
+                log.info("Seeded %d groups into groups.json.", added)
+            else:
+                log.warning("Seed file empty or missing: %s", storage.SEED_FILE)
     except Exception as e:
         log.error("Seed loading failed: %s", e)
 
