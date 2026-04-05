@@ -7,65 +7,96 @@
 <style>
   * { box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         max-width: 960px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+         max-width: 1080px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
   h1 { margin-bottom: 0.25rem; }
   .sub { color: #666; margin-bottom: 1.5rem; }
   .card { background: #f7f7f9; border: 1px solid #e3e3e8; border-radius: 8px;
           padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+  .card.warn { background: #fff3cd; border-color: #ffeeba; }
   form.add { display: flex; gap: 0.5rem; flex-direction: column; }
+  form.inline { display: inline; }
   textarea { width: 100%; padding: 0.5rem; font-family: monospace; font-size: 0.9rem;
              border: 1px solid #ccc; border-radius: 4px; min-height: 72px; resize: vertical; }
   button { padding: 0.5rem 1rem; border: 0; border-radius: 4px; cursor: pointer;
-           background: #0088cc; color: #fff; font-weight: 600; }
+           background: #0088cc; color: #fff; font-weight: 600; font-size: 0.9rem; }
   button:hover { background: #006fa8; }
   button.danger { background: #d9534f; }
   button.danger:hover { background: #b8322f; }
   button.neutral { background: #6c757d; }
   button.neutral:hover { background: #545b62; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-  th, td { text-align: left; padding: 0.55rem 0.5rem; border-bottom: 1px solid #eee; vertical-align: top; }
+  button.ghost { background: #fff; color: #0088cc; border: 1px solid #0088cc; }
+  button.ghost:hover { background: #e6f4fa; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  th, td { text-align: left; padding: 0.5rem 0.5rem; border-bottom: 1px solid #eee; vertical-align: top; }
   th { background: #fafafa; font-weight: 600; }
-  .link-cell { word-break: break-all; font-family: monospace; font-size: 0.85rem; }
+  .link-cell { word-break: break-all; font-family: monospace; font-size: 0.82rem; }
   .badge { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 12px;
-           font-size: 0.75rem; font-weight: 600; color: #fff; }
+           font-size: 0.72rem; font-weight: 600; color: #fff; }
   .badge.pending { background: #f0ad4e; }
   .badge.joined  { background: #28a745; }
   .badge.failed  { background: #d9534f; }
   .badge.skipped { background: #6c757d; }
-  .err { color: #b8322f; font-size: 0.8rem; }
-  .title { font-size: 0.85rem; color: #333; }
+  .err { color: #b8322f; font-size: 0.78rem; }
+  .title { font-size: 0.82rem; color: #333; }
   .actions form { display: inline; }
-  .actions button { padding: 0.3rem 0.6rem; font-size: 0.8rem; margin-right: 0.25rem; }
-  .stat { display: inline-block; margin-right: 1.5rem; }
-  .stat strong { color: #0088cc; font-size: 1.2rem; }
+  .actions button { padding: 0.28rem 0.55rem; font-size: 0.75rem; margin-right: 0.2rem; }
+  .stat { display: inline-block; margin-right: 1.4rem; margin-bottom: 0.4rem; }
+  .stat strong { color: #0088cc; font-size: 1.15rem; }
+  .stat.warn strong { color: #b8322f; }
+  .meta { color: #666; font-size: 0.82rem; margin-top: 0.5rem; }
+  .meta code { background: #eee; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.78rem; }
+  .truncate-note { color: #888; font-size: 0.82rem; text-align: center; padding: 0.75rem; }
 </style>
 </head>
 <body>
 
 <h1>Telegram Auto Joiner</h1>
-<div class="sub">초대 링크를 등록하면 자동으로 그룹에 입장합니다.</div>
+<div class="sub">초대 링크를 등록하면 자동으로 그룹에 입장합니다. FloodWait 방지 안전 모드.</div>
+
+{% if pause_until %}
+<div class="card warn">
+  ⚠️ FloodWait 누적으로 <strong>{{ pause_until[:19].replace('T',' ') }} UTC</strong> 까지 일시정지 중.
+</div>
+{% endif %}
 
 <div class="card">
-  <div class="stat">오늘 입장: <strong>{{ stats.joined_today }}</strong> / {{ daily_limit }}</div>
-  <div class="stat">전체: <strong>{{ groups|length }}</strong></div>
-  <div class="stat">대기: <strong>{{ groups | selectattr('status','equalto','pending') | list | length }}</strong></div>
-  <div class="stat">성공: <strong>{{ groups | selectattr('status','equalto','joined') | list | length }}</strong></div>
-  <div class="stat">실패: <strong>{{ groups | selectattr('status','equalto','failed') | list | length }}</strong></div>
+  <div class="stat">오늘 입장: <strong>{{ stats.joined_today }}</strong> / {{ effective_limit }}
+    {% if effective_limit != daily_limit %}<span class="err">(원래 {{ daily_limit }} → 스로틀)</span>{% endif %}
+  </div>
+  <div class="stat">시간당: <strong>{{ stats.joined_this_hour }}</strong> / {{ hourly_limit }}</div>
+  <div class="stat">전체: <strong>{{ counts.total }}</strong></div>
+  <div class="stat">대기: <strong>{{ counts.pending }}</strong></div>
+  <div class="stat">성공: <strong>{{ counts.joined }}</strong></div>
+  <div class="stat">실패: <strong>{{ counts.failed }}</strong></div>
+  <div class="stat {% if floodwait_count > 0 %}warn{% endif %}">
+    24h FloodWait: <strong>{{ floodwait_count }}</strong>
+  </div>
+  <div class="meta">
+    Quiet hours (KST): <code>{{ quiet_hours }}</code>
+  </div>
 </div>
 
 <div class="card">
   <form class="add" action="/groups" method="post">
-    <label><b>그룹 링크 추가</b> (한 줄에 하나씩)</label>
+    <label><b>그룹 링크 추가</b> (한 줄에 하나씩, 자동 중복 제거)</label>
     <textarea name="link" placeholder="https://t.me/+abcdefg&#10;@group_username&#10;https://t.me/joinchat/xxxxx"></textarea>
-    <div><button type="submit">추가</button></div>
+    <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+      <button type="submit">추가</button>
+    </div>
   </form>
+  <div class="meta" style="margin-top:1rem; border-top:1px solid #e3e3e8; padding-top:0.75rem;">
+    <form class="inline" action="/groups/import-seed" method="post">
+      <button type="submit" class="ghost">시드 파일 다시 불러오기</button>
+    </form>
+    <span style="margin-left:0.5rem;">— <code>data/seed_links.txt</code> 에서 새 링크만 추가합니다.</span>
+  </div>
 </div>
 
 <div class="card">
   <table>
     <thead>
       <tr>
-        <th>상태</th><th>링크 / 제목</th><th>추가 시각</th><th>입장 시각</th><th>동작</th>
+        <th>상태</th><th>링크 / 제목</th><th>추가</th><th>입장</th><th>동작</th>
       </tr>
     </thead>
     <tbody>
@@ -93,10 +124,15 @@
       </tr>
       {% else %}
       <tr><td colspan="5" style="text-align:center;color:#888;padding:2rem;">
-          아직 등록된 그룹이 없습니다.</td></tr>
+          등록된 그룹이 없습니다.</td></tr>
       {% endfor %}
     </tbody>
   </table>
+  {% if total_groups > 200 %}
+  <div class="truncate-note">
+    최근 200개만 표시 (전체 {{ total_groups }}개). 전체는 <code>/api/groups</code> 에서 조회.
+  </div>
+  {% endif %}
 </div>
 
 </body>
