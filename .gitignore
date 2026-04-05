@@ -1,0 +1,22 @@
+# Secrets / sessions
+*.session
+*.session-journal
+.env
+.env.local
+
+# Runtime data (영속 파일은 Railway Volume에서 관리)
+data/groups.json
+data/groups.json.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Telegram Auto Joiner</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         max-width: 960px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { margin-bottom: 0.25rem; }
+  .sub { color: #666; margin-bottom: 1.5rem; }
+  .card { background: #f7f7f9; border: 1px solid #e3e3e8; border-radius: 8px;
+          padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+  form.add { display: flex; gap: 0.5rem; flex-direction: column; }
+  textarea { width: 100%; padding: 0.5rem; font-family: monospace; font-size: 0.9rem;
+             border: 1px solid #ccc; border-radius: 4px; min-height: 72px; resize: vertical; }
+  button { padding: 0.5rem 1rem; border: 0; border-radius: 4px; cursor: pointer;
+           background: #0088cc; color: #fff; font-weight: 600; }
+  button:hover { background: #006fa8; }
+  button.danger { background: #d9534f; }
+  button.danger:hover { background: #b8322f; }
+  button.neutral { background: #6c757d; }
+  button.neutral:hover { background: #545b62; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.55rem 0.5rem; border-bottom: 1px solid #eee; vertical-align: top; }
+  th { background: #fafafa; font-weight: 600; }
+  .link-cell { word-break: break-all; font-family: monospace; font-size: 0.85rem; }
+  .badge { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 12px;
+           font-size: 0.75rem; font-weight: 600; color: #fff; }
+  .badge.pending { background: #f0ad4e; }
+  .badge.joined  { background: #28a745; }
+  .badge.failed  { background: #d9534f; }
+  .badge.skipped { background: #6c757d; }
+  .err { color: #b8322f; font-size: 0.8rem; }
+  .title { font-size: 0.85rem; color: #333; }
+  .actions form { display: inline; }
+  .actions button { padding: 0.3rem 0.6rem; font-size: 0.8rem; margin-right: 0.25rem; }
+  .stat { display: inline-block; margin-right: 1.5rem; }
+  .stat strong { color: #0088cc; font-size: 1.2rem; }
+</style>
+</head>
+<body>
+
+<h1>Telegram Auto Joiner</h1>
+<div class="sub">초대 링크를 등록하면 자동으로 그룹에 입장합니다.</div>
+
+<div class="card">
+  <div class="stat">오늘 입장: <strong>{{ stats.joined_today }}</strong> / {{ daily_limit }}</div>
+  <div class="stat">전체: <strong>{{ groups|length }}</strong></div>
+  <div class="stat">대기: <strong>{{ groups | selectattr('status','equalto','pending') | list | length }}</strong></div>
+  <div class="stat">성공: <strong>{{ groups | selectattr('status','equalto','joined') | list | length }}</strong></div>
+  <div class="stat">실패: <strong>{{ groups | selectattr('status','equalto','failed') | list | length }}</strong></div>
+</div>
+
+<div class="card">
+  <form class="add" action="/groups" method="post">
+    <label><b>그룹 링크 추가</b> (한 줄에 하나씩)</label>
+    <textarea name="link" placeholder="https://t.me/+abcdefg&#10;@group_username&#10;https://t.me/joinchat/xxxxx"></textarea>
+    <div><button type="submit">추가</button></div>
+  </form>
+</div>
+
+<div class="card">
+  <table>
+    <thead>
+      <tr>
+        <th>상태</th><th>링크 / 제목</th><th>추가 시각</th><th>입장 시각</th><th>동작</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for g in groups %}
+      <tr>
+        <td><span class="badge {{ g.status }}">{{ g.status }}</span></td>
+        <td>
+          <div class="link-cell">{{ g.link }}</div>
+          {% if g.title %}<div class="title">{{ g.title }}</div>{% endif %}
+          {% if g.error %}<div class="err">{{ g.error }}</div>{% endif %}
+        </td>
+        <td>{{ g.added_at[:19].replace('T',' ') }}</td>
+        <td>{{ (g.joined_at or '-')[:19].replace('T',' ') if g.joined_at else '-' }}</td>
+        <td class="actions">
+          {% if g.status != 'pending' %}
+          <form action="/groups/{{ g.id }}/retry" method="post">
+            <button type="submit" class="neutral">재시도</button>
+          </form>
+          {% endif %}
+          <form action="/groups/{{ g.id }}/delete" method="post"
+                onsubmit="return confirm('삭제하시겠어요?');">
+            <button type="submit" class="danger">삭제</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" style="text-align:center;color:#888;padding:2rem;">
+          아직 등록된 그룹이 없습니다.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+</body>
+</html>
