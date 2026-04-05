@@ -60,10 +60,11 @@
 {% endif %}
 
 <div class="card">
-  <div class="stat">오늘 입장: <strong>{{ stats.joined_today }}</strong> / {{ effective_limit }}
-    {% if effective_limit != daily_limit %}<span class="err">(원래 {{ daily_limit }} → 스로틀)</span>{% endif %}
+  <div class="stat">오늘 입장: <strong>{{ stats.joined_today }}</strong>
+    {% if effective_limit == -1 %} / ∞{% elif effective_limit == 0 %} / <span class="err">일시정지</span>{% else %} / {{ effective_limit }}{% endif %}
+    {% if effective_limit != -1 and effective_limit != daily_limit and daily_limit == 0 %}<span class="err">(스로틀)</span>{% endif %}
   </div>
-  <div class="stat">시간당: <strong>{{ stats.joined_this_hour }}</strong> / {{ hourly_limit }}</div>
+  <div class="stat">시간당: <strong>{{ stats.joined_this_hour }}</strong>{% if hourly_limit > 0 %} / {{ hourly_limit }}{% else %} / ∞{% endif %}</div>
   <div class="stat">전체: <strong>{{ counts.total }}</strong></div>
   <div class="stat">대기: <strong>{{ counts.pending }}</strong></div>
   <div class="stat">성공: <strong>{{ counts.joined }}</strong></div>
@@ -72,7 +73,7 @@
     24h FloodWait: <strong>{{ floodwait_count }}</strong>
   </div>
   <div class="meta">
-    Quiet hours (KST): <code>{{ quiet_hours }}</code>
+    Quiet hours (KST): <code>{% if quiet_hours %}{{ quiet_hours }}{% else %}off{% endif %}</code>
   </div>
 </div>
 

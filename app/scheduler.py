@@ -12,15 +12,16 @@ from .telegram_client import join_group
 
 log = logging.getLogger("scheduler")
 
-# 기본값: 대용량 리스트(610+) 대응 안전 설정
-DAILY_JOIN_LIMIT = int(os.environ.get("DAILY_JOIN_LIMIT", "12"))
-HOURLY_JOIN_LIMIT = int(os.environ.get("HOURLY_JOIN_LIMIT", "3"))
-JOIN_DELAY_MIN = int(os.environ.get("JOIN_DELAY_MIN", "240"))   # 4분
-JOIN_DELAY_MAX = int(os.environ.get("JOIN_DELAY_MAX", "540"))   # 9분
-LONG_BREAK_EVERY = int(os.environ.get("LONG_BREAK_EVERY", "5"))
-LONG_BREAK_MIN = int(os.environ.get("LONG_BREAK_MIN", "1800"))  # 30분
-LONG_BREAK_MAX = int(os.environ.get("LONG_BREAK_MAX", "3600"))  # 60분
-QUIET_HOURS_KST = os.environ.get("QUIET_HOURS_KST", "02:00-09:00")
+# 기본값: 최대 속도 모드 (FloodWait가 실제 리미트 역할)
+# 각 리미트 0 = 무제한/비활성
+DAILY_JOIN_LIMIT = int(os.environ.get("DAILY_JOIN_LIMIT", "0"))     # 0 = 무제한
+HOURLY_JOIN_LIMIT = int(os.environ.get("HOURLY_JOIN_LIMIT", "0"))   # 0 = 무제한
+JOIN_DELAY_MIN = int(os.environ.get("JOIN_DELAY_MIN", "60"))
+JOIN_DELAY_MAX = int(os.environ.get("JOIN_DELAY_MAX", "180"))
+LONG_BREAK_EVERY = int(os.environ.get("LONG_BREAK_EVERY", "0"))     # 0 = 휴식 없음
+LONG_BREAK_MIN = int(os.environ.get("LONG_BREAK_MIN", "1800"))
+LONG_BREAK_MAX = int(os.environ.get("LONG_BREAK_MAX", "3600"))
+QUIET_HOURS_KST = os.environ.get("QUIET_HOURS_KST", "")             # "" = 비활성
 
 KST = timezone(timedelta(hours=9))
 
@@ -39,7 +40,9 @@ async def _sleep(seconds: float) -> None:
 
 
 def _parse_quiet_hours() -> tuple[int, int, int, int] | None:
-    """'HH:MM-HH:MM' -> (sh, sm, eh, em)."""
+    """'HH:MM-HH:MM' -> (sh, sm, eh, em). 빈 문자열이면 None."""
+    if not QUIET_HOURS_KST or QUIET_HOURS_KST.lower() in ("off", "none", "disabled"):
+        return None
     try:
         a, b = QUIET_HOURS_KST.split("-")
         sh, sm = map(int, a.split(":"))
@@ -77,10 +80,19 @@ def _seconds_to_quiet_end(now_kst: datetime) -> int:
 
 
 def _effective_daily_limit(state: dict) -> int:
-    """FloodWait 누적에 따른 자동 스로틀."""
+    """FloodWait 누적에 따른 자동 스로틀.
+    반환값: -1 = 무제한, 0 = 일시정지, N = 해당 숫자 한도.
+    """
     fw_count = storage.prune_floodwait(state)
     if fw_count >= 4:
-        return 0  # 일시정지
+        return 0  # 24시간 일시정지
+    # 무제한 모드에서 FloodWait 누적되면 점진적으로 좁혀짐
+    if DAILY_JOIN_LIMIT == 0:
+        if fw_count == 3:
+            return 20
+        if fw_count == 2:
+            return 50
+        return -1  # 무제한
     if fw_count == 3:
         return max(1, DAILY_JOIN_LIMIT // 4)
     if fw_count == 2:
@@ -157,12 +169,12 @@ async def run_joiner_loop() -> None:
                 storage.write_state(state)
                 continue
 
-            if state["stats"]["joined_today"] >= eff_limit:
+            if eff_limit > 0 and state["stats"]["joined_today"] >= eff_limit:
                 log.info("Daily limit %d reached. Sleeping until next hour.", eff_limit)
                 await _sleep(3600)
                 continue
 
-            # Quiet hours
+            # Quiet hours (설정돼 있을 때만)
             now_kst = datetime.now(KST)
             if _in_quiet_hours(now_kst):
                 wait_s = _seconds_to_quiet_end(now_kst)
@@ -170,9 +182,8 @@ async def run_joiner_loop() -> None:
                 await _sleep(wait_s)
                 continue
 
-            # 시간당 한도
-            if state["stats"]["joined_this_hour"] >= HOURLY_JOIN_LIMIT:
-                # 다음 정각까지 대기
+            # 시간당 한도 (0이면 스킵)
+            if HOURLY_JOIN_LIMIT > 0 and state["stats"]["joined_this_hour"] >= HOURLY_JOIN_LIMIT:
                 next_hour = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(
                     minute=0, second=0, microsecond=0
                 )
@@ -181,8 +192,8 @@ async def run_joiner_loop() -> None:
                 await _sleep(wait_s)
                 continue
 
-            # 긴 휴식
-            if state["stats"].get("joins_since_break", 0) >= LONG_BREAK_EVERY:
+            # 긴 휴식 (0이면 스킵)
+            if LONG_BREAK_EVERY > 0 and state["stats"].get("joins_since_break", 0) >= LONG_BREAK_EVERY:
                 rest = random.randint(LONG_BREAK_MIN, LONG_BREAK_MAX)
                 log.info("Long break (%d joins done). Sleeping %ds.", LONG_BREAK_EVERY, rest)
                 state["stats"]["joins_since_break"] = 0
