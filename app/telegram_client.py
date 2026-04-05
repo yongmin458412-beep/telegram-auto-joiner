@@ -13,6 +13,12 @@ from telethon.errors import (
     InviteHashInvalidError,
     UserAlreadyParticipantError,
 )
+
+# InviteRequestSentError는 telethon 버전에 따라 위치가 다를 수 있음
+try:
+    from telethon.errors import InviteRequestSentError  # type: ignore
+except ImportError:
+    InviteRequestSentError = None  # type: ignore
 from telethon.sessions import StringSession
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
@@ -111,4 +117,9 @@ async def join_group(link: str) -> tuple[bool, Optional[str], Optional[str], Opt
     except FloodWaitError as e:
         return False, None, f"flood wait {e.seconds}s", int(e.seconds)
     except Exception as e:
+        # InviteRequestSentError: 승인 필요 채널에 요청 전송됨 (성공으로 처리)
+        if InviteRequestSentError is not None and isinstance(e, InviteRequestSentError):
+            return True, None, "join request sent (approval pending)", None
+        if "InviteRequestSent" in type(e).__name__ or "successfully requested" in str(e):
+            return True, None, "join request sent (approval pending)", None
         return False, None, f"{type(e).__name__}: {e}", None
