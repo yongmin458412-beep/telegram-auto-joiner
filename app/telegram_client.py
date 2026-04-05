@@ -71,11 +71,19 @@ def discover_accounts() -> list[tuple[str, str]]:
     return accounts
 
 
+def _get_account_credentials(account_name: str) -> tuple[int, str]:
+    """계정별 api_id/hash 우선, 없으면 전역 fallback."""
+    per_id = os.environ.get(f"TELEGRAM_API_ID_{account_name}", "").strip()
+    per_hash = os.environ.get(f"TELEGRAM_API_HASH_{account_name}", "").strip()
+    if per_id and per_hash:
+        return int(per_id), per_hash
+    return int(_get_env("TELEGRAM_API_ID")), _get_env("TELEGRAM_API_HASH")
+
+
 async def get_client(account_name: str) -> TelegramClient:
     if account_name in _clients:
         return _clients[account_name]
-    api_id = int(_get_env("TELEGRAM_API_ID"))
-    api_hash = _get_env("TELEGRAM_API_HASH")
+    api_id, api_hash = _get_account_credentials(account_name)
     sessions = dict(discover_accounts())
     if account_name not in sessions:
         raise RuntimeError(f"Unknown account: {account_name}")
