@@ -7,6 +7,7 @@ import os
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -96,26 +97,32 @@ async def lifespan(app: FastAPI):
     accounts = discover_accounts()
     log.info("Discovered %d account(s): %s", len(accounts), [a[0] for a in accounts])
 
-    # 각 계정 클라이언트 연결 시도
-    connected = []
-    for name, _session in accounts:
+    # 각 계정 클라이언트 연결 시도 (병렬)
+    async def _try_connect(name: str) -> tuple[str, bool, Optional[str]]:
         try:
             await get_client(name)
             log.info("[%s] Telegram client connected.", name)
-            connected.append(name)
+            return name, True, None
         except Exception as e:
             log.error("[%s] Client connect failed: %s", name, e)
+            return name, False, str(e)
+
+    connect_results = await asyncio.gather(
+        *[_try_connect(name) for name, _s in accounts],
+        return_exceptions=False,
+    )
+    connected = [name for name, ok, _err in connect_results if ok]
 
     if not connected:
         log.error("No Telegram clients connected. Workers will not start.")
     else:
         log.info(
             "Starting %d join worker(s) + %d forward worker(s). "
-            "join_delay=%d-%ds forward_delay=%d-%ds forward_limit=%d/day",
+            "join_delay=%d-%ds rounds=%d/day interval=%sh within_round=%d-%ds",
             len(connected), len(connected),
             scheduler.JOIN_DELAY_MIN, scheduler.JOIN_DELAY_MAX,
-            forwarder.FORWARD_DELAY_MIN, forwarder.FORWARD_DELAY_MAX,
-            forwarder.DAILY_FORWARD_LIMIT,
+            forwarder.DAILY_ROUND_LIMIT, forwarder.ROUND_INTERVAL_HOURS,
+            forwarder.WITHIN_ROUND_DELAY_MIN, forwarder.WITHIN_ROUND_DELAY_MAX,
         )
         for name in connected:
             join_task = asyncio.create_task(scheduler.run_worker(name))
