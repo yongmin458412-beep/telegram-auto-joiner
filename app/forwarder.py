@@ -16,13 +16,13 @@ from .telegram_client import forward_and_counter, resolve_source_channel
 
 log = logging.getLogger("forwarder")
 
-# 라운드 기반 설정
-DAILY_ROUND_LIMIT = int(os.environ.get("DAILY_ROUND_LIMIT", "10"))
-ROUND_INTERVAL_HOURS = float(os.environ.get("ROUND_INTERVAL_HOURS", "2.4"))
+# 라운드 기반 설정 (지속 가능한 최대치)
+DAILY_ROUND_LIMIT = int(os.environ.get("DAILY_ROUND_LIMIT", "3"))
+ROUND_INTERVAL_HOURS = float(os.environ.get("ROUND_INTERVAL_HOURS", "6"))
 
 # 라운드 내 그룹 간 딜레이 (burst 회피)
-WITHIN_ROUND_DELAY_MIN = int(os.environ.get("WITHIN_ROUND_DELAY_MIN", "30"))
-WITHIN_ROUND_DELAY_MAX = int(os.environ.get("WITHIN_ROUND_DELAY_MAX", "90"))
+WITHIN_ROUND_DELAY_MIN = int(os.environ.get("WITHIN_ROUND_DELAY_MIN", "90"))
+WITHIN_ROUND_DELAY_MAX = int(os.environ.get("WITHIN_ROUND_DELAY_MAX", "180"))
 
 # 절대 안전 한도 (0 = 없음)
 DAILY_FORWARD_LIMIT = int(os.environ.get("DAILY_FORWARD_LIMIT", "0"))
