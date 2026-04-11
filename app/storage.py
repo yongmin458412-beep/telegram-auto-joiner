@@ -31,6 +31,25 @@ def _empty_account_stats() -> dict[str, Any]:
         "effective_daily_limit": None,
         "pause_until": None,
         "last_activity": None,
+        # forward 전용
+        "forwarded_today": 0,
+        "forward_last_reset": datetime.now(timezone.utc).date().isoformat(),
+        "forwarded_total": 0,
+        "forward_floodwait_events": [],
+        "forward_effective_limit": None,
+        "forward_pause_until": None,
+        "forward_last_activity": None,
+    }
+
+
+def _empty_forward_account() -> dict[str, Any]:
+    return {
+        "source_link": "",
+        "source_message_id": 0,
+        "source_chat_id": None,
+        "source_accessible": False,
+        "last_check": None,
+        "last_check_error": None,
     }
 
 
@@ -40,6 +59,13 @@ def _empty_state() -> dict[str, Any]:
         "stats": {
             "accounts": {},  # name -> account_stats
             "global_floodwait_events": [],
+            "global_forward_floodwait_events": [],
+        },
+        "forward_config": {
+            "enabled": False,
+            "initial_delay_hours": 24,
+            "accounts": {},
+            "updated_at": None,
         },
     }
 
@@ -75,10 +101,35 @@ def _migrate(state: dict[str, Any]) -> dict[str, Any]:
         }
         stats["accounts"] = {"1": old}
     stats.setdefault("global_floodwait_events", [])
-    # groups 항목에 claimed_by 필드 추가
+    stats.setdefault("global_forward_floodwait_events", [])
+
+    # 계정별 forward 필드 마이그레이션
+    today = datetime.now(timezone.utc).date().isoformat()
+    for acc in stats["accounts"].values():
+        acc.setdefault("forwarded_today", 0)
+        acc.setdefault("forward_last_reset", today)
+        acc.setdefault("forwarded_total", 0)
+        acc.setdefault("forward_floodwait_events", [])
+        acc.setdefault("forward_effective_limit", None)
+        acc.setdefault("forward_pause_until", None)
+        acc.setdefault("forward_last_activity", None)
+
+    # 그룹 필드 마이그레이션
     for g in state.get("groups", []):
         g.setdefault("claimed_by", None)
         g.setdefault("worker", None)
+        g.setdefault("forward_enabled", False)
+        g.setdefault("forward_count", 0)
+        g.setdefault("last_forwarded_at", None)
+        g.setdefault("last_forward_error", None)
+
+    # forward_config 마이그레이션
+    fc = state.setdefault("forward_config", {})
+    fc.setdefault("enabled", False)
+    fc.setdefault("initial_delay_hours", 24)
+    fc.setdefault("accounts", {})
+    fc.setdefault("updated_at", None)
+
     return state
 
 
@@ -382,4 +433,231 @@ def prune_global_floodwait(state: dict[str, Any]) -> int:
         if datetime.fromisoformat(e.replace("Z", "+00:00")).timestamp() >= cutoff
     ]
     state["stats"]["global_floodwait_events"] = events
+    return len(events)
+
+
+# ---------- Forward 기능 ----------
+
+def set_forward_config_account(acc_name: str, source_link: str, message_id: int) -> None:
+    state = read_state()
+    normalized = normalize_link(source_link) or source_link.strip()
+    fc = state.setdefault("forward_config", {})
+    accounts = fc.setdefault("accounts", {})
+    prev = accounts.get(acc_name) or _empty_forward_account()
+    # 링크 또는 메시지 ID가 바뀌면 resolved 캐시 무효화
+    changed = prev.get("source_link") != normalized or prev.get("source_message_id") != int(message_id)
+    accounts[acc_name] = {
+        **_empty_forward_account(),
+        "source_link": normalized,
+        "source_message_id": int(message_id),
+        "source_chat_id": None if changed else prev.get("source_chat_id"),
+        "source_accessible": False if changed else prev.get("source_accessible", False),
+        "last_check": None if changed else prev.get("last_check"),
+        "last_check_error": None if changed else prev.get("last_check_error"),
+    }
+    fc["updated_at"] = datetime.now(timezone.utc).isoformat()
+    write_state(state)
+
+
+def set_forward_enabled_global(enabled: bool) -> None:
+    state = read_state()
+    state.setdefault("forward_config", {})["enabled"] = bool(enabled)
+    state["forward_config"]["updated_at"] = datetime.now(timezone.utc).isoformat()
+    write_state(state)
+
+
+def set_forward_initial_delay(hours: float) -> None:
+    state = read_state()
+    state.setdefault("forward_config", {})["initial_delay_hours"] = float(hours)
+    state["forward_config"]["updated_at"] = datetime.now(timezone.utc).isoformat()
+    write_state(state)
+
+
+def set_source_resolved(
+    acc_name: str,
+    chat_id: Optional[int],
+    accessible: bool,
+    error: Optional[str] = None,
+) -> None:
+    state = read_state()
+    fc = state.setdefault("forward_config", {})
+    accounts = fc.setdefault("accounts", {})
+    acc = accounts.get(acc_name) or _empty_forward_account()
+    acc["source_chat_id"] = chat_id
+    acc["source_accessible"] = bool(accessible)
+    acc["last_check"] = datetime.now(timezone.utc).isoformat()
+    acc["last_check_error"] = error
+    accounts[acc_name] = acc
+    write_state(state)
+
+
+def toggle_forward(group_id: str, enabled: bool) -> None:
+    state = read_state()
+    for g in state["groups"]:
+        if g["id"] == group_id:
+            g["forward_enabled"] = bool(enabled)
+            break
+    write_state(state)
+
+
+def set_forward_enabled_bulk(group_ids: list[str], enabled: bool) -> int:
+    state = read_state()
+    ids = set(group_ids)
+    count = 0
+    for g in state["groups"]:
+        if g["id"] in ids:
+            g["forward_enabled"] = bool(enabled)
+            count += 1
+    if count:
+        write_state(state)
+    return count
+
+
+def enable_forward_all_joined() -> int:
+    """지금까지 joined 된 그룹 전부 forward_enabled=True."""
+    state = read_state()
+    count = 0
+    for g in state["groups"]:
+        if g["status"] == "joined" and not g.get("forward_enabled"):
+            g["forward_enabled"] = True
+            count += 1
+    if count:
+        write_state(state)
+    return count
+
+
+def disable_forward_all() -> int:
+    state = read_state()
+    count = 0
+    for g in state["groups"]:
+        if g.get("forward_enabled"):
+            g["forward_enabled"] = False
+            count += 1
+    if count:
+        write_state(state)
+    return count
+
+
+def reset_forward_count(group_id: str) -> None:
+    state = read_state()
+    for g in state["groups"]:
+        if g["id"] == group_id:
+            g["forward_count"] = 0
+            g["last_forwarded_at"] = None
+            break
+    write_state(state)
+
+
+def get_forward_targets(acc_name: str, initial_delay_hours: float) -> list[dict[str, Any]]:
+    """해당 계정이 전달할 수 있는 그룹 목록 (우선순위 정렬)."""
+    state = read_state()
+    cutoff_ts = datetime.now(timezone.utc).timestamp() - initial_delay_hours * 3600
+    targets: list[dict[str, Any]] = []
+    for g in state["groups"]:
+        if g.get("status") != "joined":
+            continue
+        if g.get("worker") != acc_name:
+            continue
+        if not g.get("forward_enabled"):
+            continue
+        joined_at = g.get("joined_at")
+        if not joined_at:
+            continue
+        try:
+            joined_ts = datetime.fromisoformat(joined_at.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if joined_ts > cutoff_ts:
+            continue  # 초기 지연 미충족
+        targets.append(g)
+
+    def sort_key(g):
+        # last_forwarded_at NULLS FIRST (한 번도 안 보낸 그룹 먼저)
+        last = g.get("last_forwarded_at")
+        return (0, "") if not last else (1, last)
+
+    targets.sort(key=sort_key)
+    return [dict(g) for g in targets]
+
+
+def record_forward_success(group_id: str, acc_name: str) -> int:
+    """성공 기록. 반환값: 업데이트된 forward_count (N)."""
+    state = read_state()
+    new_count = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for g in state["groups"]:
+        if g["id"] == group_id:
+            g["forward_count"] = int(g.get("forward_count", 0)) + 1
+            g["last_forwarded_at"] = now_iso
+            g["last_forward_error"] = None
+            new_count = g["forward_count"]
+            break
+    # 계정 통계 업데이트
+    maybe_reset_forward_counters(state, acc_name)
+    acc = ensure_account(state, acc_name)
+    acc["forwarded_today"] = acc.get("forwarded_today", 0) + 1
+    acc["forwarded_total"] = acc.get("forwarded_total", 0) + 1
+    acc["forward_last_activity"] = now_iso
+    write_state(state)
+    return new_count
+
+
+def record_forward_error(group_id: str, error: str, disable: bool) -> None:
+    state = read_state()
+    for g in state["groups"]:
+        if g["id"] == group_id:
+            g["last_forward_error"] = error
+            if disable:
+                g["forward_enabled"] = False
+            break
+    write_state(state)
+
+
+def maybe_reset_forward_counters(state: dict[str, Any], acc_name: str) -> None:
+    today = datetime.now(timezone.utc).date().isoformat()
+    acc = ensure_account(state, acc_name)
+    if acc.get("forward_last_reset") != today:
+        acc["forwarded_today"] = 0
+        acc["forward_last_reset"] = today
+
+
+def record_forward_floodwait(state: dict[str, Any], acc_name: str) -> None:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    acc = ensure_account(state, acc_name)
+    events = acc.get("forward_floodwait_events", [])
+    events.append(now_iso)
+    cutoff = datetime.now(timezone.utc).timestamp() - 86400
+    events = [
+        e for e in events
+        if datetime.fromisoformat(e.replace("Z", "+00:00")).timestamp() >= cutoff
+    ]
+    acc["forward_floodwait_events"] = events
+    gevents = state["stats"].setdefault("global_forward_floodwait_events", [])
+    gevents.append(now_iso)
+    gevents[:] = [
+        e for e in gevents
+        if datetime.fromisoformat(e.replace("Z", "+00:00")).timestamp() >= cutoff
+    ]
+
+
+def prune_forward_floodwait(state: dict[str, Any], acc_name: str) -> int:
+    acc = ensure_account(state, acc_name)
+    events = acc.get("forward_floodwait_events", [])
+    cutoff = datetime.now(timezone.utc).timestamp() - 86400
+    events = [
+        e for e in events
+        if datetime.fromisoformat(e.replace("Z", "+00:00")).timestamp() >= cutoff
+    ]
+    acc["forward_floodwait_events"] = events
+    return len(events)
+
+
+def prune_global_forward_fw(state: dict[str, Any]) -> int:
+    events = state["stats"].get("global_forward_floodwait_events", [])
+    cutoff = datetime.now(timezone.utc).timestamp() - 86400
+    events = [
+        e for e in events
+        if datetime.fromisoformat(e.replace("Z", "+00:00")).timestamp() >= cutoff
+    ]
+    state["stats"]["global_forward_floodwait_events"] = events
     return len(events)

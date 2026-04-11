@@ -5,13 +5,20 @@ import os
 import re
 from typing import Optional
 
+import asyncio
+
 from telethon import TelegramClient
 from telethon.errors import (
     ChannelsTooMuchError,
+    ChannelPrivateError,
+    ChatWriteForbiddenError,
     FloodWaitError,
     InviteHashExpiredError,
     InviteHashInvalidError,
+    MessageIdInvalidError,
+    SlowModeWaitError,
     UserAlreadyParticipantError,
+    UserBannedInChannelError,
 )
 from telethon.sessions import StringSession
 from telethon.tl.functions.channels import JoinChannelRequest
@@ -171,3 +178,111 @@ async def join_group(account_name: str, link: str) -> tuple[bool, Optional[str],
         if "InviteRequestSent" in type(e).__name__ or "successfully requested" in str(e):
             return True, None, "join request sent (approval pending)", None
         return False, None, f"{type(e).__name__}: {e}", None
+
+
+# ---------- Forward 기능 ----------
+
+async def resolve_source_channel(
+    account_name: str, source_link: str
+) -> tuple[Optional[int], bool, Optional[str]]:
+    """소스 채널을 해당 계정으로 해소(이미 멤버면 get_entity, 아니면 가입).
+
+    Returns: (chat_id, accessible, error)
+    """
+    if not source_link:
+        return None, False, "empty source_link"
+
+    try:
+        kind, value = parse_link(source_link)
+    except ValueError as e:
+        return None, False, f"bad link: {e}"
+
+    client = await get_client(account_name)
+    # 이미 멤버인지 시도
+    try:
+        entity = await client.get_entity(source_link)
+        chat_id = getattr(entity, "id", None)
+        return chat_id, True, None
+    except Exception:
+        pass
+
+    # 가입 시도
+    try:
+        if kind == "invite":
+            await client(ImportChatInviteRequest(value))
+        else:
+            await client(JoinChannelRequest(value))
+        # 가입 후 다시 해소
+        entity = await client.get_entity(source_link)
+        return getattr(entity, "id", None), True, None
+    except UserAlreadyParticipantError:
+        try:
+            entity = await client.get_entity(source_link)
+            return getattr(entity, "id", None), True, None
+        except Exception as e:
+            return None, False, f"resolve after join: {e}"
+    except FloodWaitError as e:
+        return None, False, f"flood wait {e.seconds}s"
+    except Exception as e:
+        return None, False, f"{type(e).__name__}: {e}"
+
+
+async def forward_and_counter(
+    account_name: str,
+    target_link: str,
+    source_chat_id: int,
+    source_message_id: int,
+    counter_text: str,
+) -> tuple[bool, Optional[str], Optional[int], bool]:
+    """원본 메시지 전달 + 카운터 메시지 전송.
+
+    Returns: (ok, error, flood_wait_seconds, disable_group)
+    disable_group=True 이면 해당 그룹은 쓰기 금지/차단 상태이므로
+    forward_enabled 를 자동으로 false 로 내려야 함.
+    """
+    client = await get_client(account_name)
+
+    try:
+        target_entity = await client.get_entity(target_link)
+    except FloodWaitError as e:
+        return False, f"flood wait {e.seconds}s (resolve target)", int(e.seconds), False
+    except Exception as e:
+        return False, f"resolve target: {type(e).__name__}: {e}", None, False
+
+    # 1) 원본 메시지 전달
+    try:
+        await client.forward_messages(
+            entity=target_entity,
+            messages=source_message_id,
+            from_peer=source_chat_id,
+        )
+    except FloodWaitError as e:
+        return False, f"flood wait {e.seconds}s (forward)", int(e.seconds), False
+    except (ChatWriteForbiddenError, UserBannedInChannelError):
+        return False, "write forbidden / banned", None, True
+    except SlowModeWaitError as e:
+        return False, f"slow mode {e.seconds}s", int(e.seconds), False
+    except MessageIdInvalidError:
+        return False, "source message id invalid", None, False
+    except ChannelPrivateError:
+        return False, "source channel private", None, False
+    except Exception as e:
+        msg = f"forward: {type(e).__name__}: {e}"
+        # 소스 관련 에러 경향 감지
+        return False, msg, None, False
+
+    # 2) 짧은 대기 후 카운터 메시지
+    await asyncio.sleep(1.5)
+    try:
+        await client.send_message(target_entity, counter_text)
+    except FloodWaitError as e:
+        # forward는 이미 성공했으므로 ok=True, 단 카운터는 미전송
+        return True, f"forwarded, counter flood wait {e.seconds}s", int(e.seconds), False
+    except (ChatWriteForbiddenError, UserBannedInChannelError):
+        return True, "forwarded, counter write forbidden", None, False
+    except SlowModeWaitError as e:
+        return True, f"forwarded, counter slow mode {e.seconds}s", int(e.seconds), False
+    except Exception as e:
+        return True, f"forwarded, counter: {type(e).__name__}: {e}", None, False
+
+    return True, None, None, False

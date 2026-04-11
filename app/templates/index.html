@@ -87,22 +87,109 @@
     {% for a in accounts %}
     <div class="worker {% if a.pause_until %}paused{% endif %}">
       <h3>#{{ a.name }}{% if a.pause_until %} ⏸{% endif %}</h3>
-      <div class="row">오늘: <b>{{ a.joined_today }}</b>
+      <div class="row">가입 오늘: <b>{{ a.joined_today }}</b>
         {% if a.effective_limit == -1 %}/ ∞
         {% elif a.effective_limit == 0 %}/ <span class="err">정지</span>
         {% elif a.effective_limit is not none %}/ {{ a.effective_limit }}
         {% endif %}
       </div>
-      <div class="row">시간: <b>{{ a.joined_this_hour }}</b>{% if hourly_limit > 0 %} / {{ hourly_limit }}{% endif %}</div>
-      <div class="row {% if a.fw_count > 0 %}err{% endif %}">FW(24h): <b>{{ a.fw_count }}</b></div>
+      <div class="row">가입 시간: <b>{{ a.joined_this_hour }}</b>{% if hourly_limit > 0 %} / {{ hourly_limit }}{% endif %}</div>
+      <div class="row {% if a.fw_count > 0 %}err{% endif %}">가입 FW(24h): <b>{{ a.fw_count }}</b></div>
+      <hr style="border:0;border-top:1px dashed #ddd;margin:0.4rem 0;">
+      <div class="row">전달 오늘: <b>{{ a.forwarded_today }}</b> / {{ forward_daily_limit }}
+        {% if a.forward_effective_limit is not none and a.forward_effective_limit != forward_daily_limit %}
+          <span class="err">(→{{ a.forward_effective_limit }})</span>
+        {% endif %}
+      </div>
+      <div class="row">전달 누적: <b>{{ a.forwarded_total }}</b></div>
+      <div class="row {% if a.forward_fw_count > 0 %}err{% endif %}">전달 FW(24h): <b>{{ a.forward_fw_count }}</b></div>
+      <div class="row">소스:
+        {% if a.source_link %}
+          {% if a.source_accessible %}🟢{% else %}🔴{% endif %}
+          <span style="font-size:0.72rem;color:#666;">msg #{{ a.source_message_id }}</span>
+        {% else %}⚪ 미설정{% endif %}
+      </div>
       {% if a.last_activity %}
-      <div class="row" style="color:#888;font-size:0.75rem;">{{ a.last_activity[:19].replace('T',' ') }}</div>
+      <div class="row" style="color:#888;font-size:0.72rem;">활동 {{ a.last_activity[:19].replace('T',' ') }}</div>
       {% endif %}
     </div>
     {% endfor %}
   </div>
 </div>
 {% endif %}
+
+<div class="card">
+  <h2 style="margin-top:0;font-size:1.1rem;">메시지 전달 설정</h2>
+  <div style="margin-bottom:0.75rem;">
+    전체 전달:
+    <strong style="color:{% if forward_enabled_global %}#28a745{% else %}#6c757d{% endif %};">
+      {% if forward_enabled_global %}🟢 ON{% else %}⚪ OFF{% endif %}
+    </strong>
+    <form class="inline" action="/forward/toggle-global" method="post" style="margin-left:0.5rem;">
+      <input type="hidden" name="enabled" value="{% if forward_enabled_global %}0{% else %}1{% endif %}">
+      <button type="submit" class="{% if forward_enabled_global %}danger{% else %}ghost{% endif %}">
+        {% if forward_enabled_global %}전체 OFF{% else %}전체 ON{% endif %}
+      </button>
+    </form>
+    <span class="stat">전달 daily: <strong>{{ forward_daily_limit }}</strong>/계정</span>
+    <span class="stat {% if global_forward_fw > 0 %}warn{% endif %}">
+      전달 전역 FW(24h): <strong>{{ global_forward_fw }}</strong>/{{ global_forward_fw_threshold }}
+    </span>
+  </div>
+
+  <form class="inline" action="/forward/initial-delay" method="post" style="margin-bottom:0.75rem;display:block;">
+    <label style="font-size:0.85rem;">가입 후 첫 전달까지 대기 시간 (시간):
+      <input type="number" name="hours" step="0.01" min="0" value="{{ forward_initial_delay_hours }}" style="width:80px;">
+    </label>
+    <button type="submit" class="ghost">저장</button>
+  </form>
+
+  <div class="workers" style="grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));">
+    {% for a in accounts %}
+    <div class="worker">
+      <h3>계정 #{{ a.name }} 소스 설정</h3>
+      <form action="/forward/config/{{ a.name }}" method="post">
+        <div style="margin:0.3rem 0;">
+          <input type="text" name="source_link" placeholder="https://t.me/mychannel"
+                 value="{{ a.source_link }}"
+                 style="width:100%;padding:0.3rem;border:1px solid #ccc;border-radius:3px;font-size:0.8rem;">
+        </div>
+        <div style="margin:0.3rem 0;">
+          <input type="number" name="message_id" placeholder="메시지 ID" min="1"
+                 value="{{ a.source_message_id or '' }}"
+                 style="width:100%;padding:0.3rem;border:1px solid #ccc;border-radius:3px;font-size:0.8rem;">
+        </div>
+        <button type="submit" class="ghost" style="width:100%;">저장</button>
+      </form>
+      <div class="row" style="margin-top:0.4rem;">
+        상태:
+        {% if not a.source_link %}⚪ 미설정
+        {% elif a.source_accessible %}🟢 접근 가능
+        {% else %}🔴 불가
+          {% if a.source_last_check_error %}
+            <div class="err" style="font-size:0.7rem;">{{ a.source_last_check_error }}</div>
+          {% endif %}
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div style="margin-top:0.75rem;">
+    <form class="inline" action="/forward/resolve" method="post">
+      <button type="submit">모든 계정 소스 확인/가입</button>
+    </form>
+    <form class="inline" action="/forward/enable-all-joined" method="post" style="margin-left:0.5rem;">
+      <button type="submit" class="ghost">가입된 그룹 전부 전달 ON</button>
+    </form>
+    <form class="inline" action="/forward/disable-all" method="post" style="margin-left:0.5rem;">
+      <button type="submit" class="danger">전달 대상 전부 OFF</button>
+    </form>
+    <span class="meta" style="display:block;margin-top:0.4rem;">
+      현재 전달 대상(ON): <strong>{{ counts.forward_enabled }}</strong>개
+    </span>
+  </div>
+</div>
 
 <div class="card">
   <form class="add" action="/groups" method="post">
@@ -122,7 +209,7 @@
   <table>
     <thead>
       <tr>
-        <th>상태</th><th>링크 / 제목</th><th>추가</th><th>입장</th><th>동작</th>
+        <th>상태</th><th>링크 / 제목</th><th>추가</th><th>입장</th><th>전달</th><th>동작</th>
       </tr>
     </thead>
     <tbody>
@@ -140,6 +227,34 @@
         </td>
         <td>{{ g.added_at[:19].replace('T',' ') }}</td>
         <td>{{ (g.joined_at or '-')[:19].replace('T',' ') if g.joined_at else '-' }}</td>
+        <td>
+          {% if g.status == 'joined' %}
+            <form class="inline" action="/groups/{{ g.id }}/forward-toggle" method="post">
+              <input type="hidden" name="enabled" value="{% if g.forward_enabled %}0{% else %}1{% endif %}">
+              <button type="submit" class="{% if g.forward_enabled %}danger{% else %}ghost{% endif %}">
+                {% if g.forward_enabled %}ON{% else %}OFF{% endif %}
+              </button>
+            </form>
+            {% if g.forward_count and g.forward_count > 0 %}
+              <div style="font-size:0.75rem;color:#28a745;margin-top:0.2rem;">
+                {{ g.forward_count }}회 전송됨
+              </div>
+              <form class="inline" action="/groups/{{ g.id }}/forward-reset-count" method="post">
+                <button type="submit" class="neutral" style="padding:0.15rem 0.4rem;font-size:0.7rem;">↺ 리셋</button>
+              </form>
+            {% endif %}
+            {% if g.last_forwarded_at %}
+              <div style="font-size:0.7rem;color:#888;margin-top:0.15rem;">
+                {{ g.last_forwarded_at[:19].replace('T',' ') }}
+              </div>
+            {% endif %}
+            {% if g.last_forward_error %}
+              <div class="err" style="font-size:0.7rem;margin-top:0.15rem;">{{ g.last_forward_error }}</div>
+            {% endif %}
+          {% else %}
+            <span style="color:#ccc;font-size:0.75rem;">-</span>
+          {% endif %}
+        </td>
         <td class="actions">
           {% if g.status != 'pending' and g.status != 'processing' %}
           <form action="/groups/{{ g.id }}/retry" method="post">
@@ -152,7 +267,7 @@
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="5" style="text-align:center;color:#888;padding:2rem;">
+      <tr><td colspan="6" style="text-align:center;color:#888;padding:2rem;">
           등록된 그룹이 없습니다.</td></tr>
       {% endfor %}
     </tbody>

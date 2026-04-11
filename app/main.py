@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 
-from . import scheduler, storage
+from . import forwarder, scheduler, storage
 from .telegram_client import disconnect_all, discover_accounts, get_client
 
 logging.basicConfig(
@@ -110,19 +110,23 @@ async def lifespan(app: FastAPI):
         log.error("No Telegram clients connected. Workers will not start.")
     else:
         log.info(
-            "Starting %d worker(s). delay=%d-%ds, start_jitter=0-%ds",
-            len(connected),
-            scheduler.JOIN_DELAY_MIN,
-            scheduler.JOIN_DELAY_MAX,
-            scheduler.WORKER_START_JITTER_MAX,
+            "Starting %d join worker(s) + %d forward worker(s). "
+            "join_delay=%d-%ds forward_delay=%d-%ds forward_limit=%d/day",
+            len(connected), len(connected),
+            scheduler.JOIN_DELAY_MIN, scheduler.JOIN_DELAY_MAX,
+            forwarder.FORWARD_DELAY_MIN, forwarder.FORWARD_DELAY_MAX,
+            forwarder.DAILY_FORWARD_LIMIT,
         )
         for name in connected:
-            task = asyncio.create_task(scheduler.run_worker(name))
-            _worker_tasks.append(task)
+            join_task = asyncio.create_task(scheduler.run_worker(name))
+            fwd_task = asyncio.create_task(forwarder.run_forward_worker(name))
+            _worker_tasks.append(join_task)
+            _worker_tasks.append(fwd_task)
 
     yield
 
     scheduler.stop()
+    forwarder.stop()
     for task in _worker_tasks:
         try:
             await asyncio.wait_for(task, timeout=5)
@@ -144,22 +148,47 @@ async def index(request: Request, _: str = Depends(auth)):
         "joined": sum(1 for g in state["groups"] if g["status"] == "joined"),
         "failed": sum(1 for g in state["groups"] if g["status"] == "failed"),
         "total": len(state["groups"]),
+        "forward_enabled": sum(1 for g in state["groups"] if g.get("forward_enabled")),
     }
-    # 계정별 유효 한도 계산
+
+    forward_config = state.get("forward_config", {})
+    fc_accounts = forward_config.get("accounts", {})
+
+    # 발견된 계정 목록 (env var 기반 + 이미 등록된 통계 기반 합집합)
+    from .telegram_client import discover_accounts as _discover_accounts
+    discovered = [name for name, _ in _discover_accounts()]
+    for name in state["stats"]["accounts"].keys():
+        if name not in discovered:
+            discovered.append(name)
+    discovered.sort(key=lambda n: (0, int(n)) if n.isdigit() else (1, n))
+
+    # 계정별 뷰
     accounts_view = []
-    for name, acc in state["stats"]["accounts"].items():
-        eff = acc.get("effective_daily_limit")
+    for name in discovered:
+        acc = state["stats"]["accounts"].get(name, {})
+        fc_acc = fc_accounts.get(name, {})
         accounts_view.append({
             "name": name,
             "joined_today": acc.get("joined_today", 0),
             "joined_this_hour": acc.get("joined_this_hour", 0),
-            "effective_limit": eff,
+            "effective_limit": acc.get("effective_daily_limit"),
             "fw_count": len(acc.get("floodwait_events", [])),
             "pause_until": acc.get("pause_until"),
             "last_activity": acc.get("last_activity"),
+            "forwarded_today": acc.get("forwarded_today", 0),
+            "forwarded_total": acc.get("forwarded_total", 0),
+            "forward_fw_count": len(acc.get("forward_floodwait_events", [])),
+            "forward_pause_until": acc.get("forward_pause_until"),
+            "forward_effective_limit": acc.get("forward_effective_limit"),
+            "source_link": fc_acc.get("source_link", ""),
+            "source_message_id": fc_acc.get("source_message_id", 0),
+            "source_accessible": fc_acc.get("source_accessible", False),
+            "source_last_check": fc_acc.get("last_check"),
+            "source_last_check_error": fc_acc.get("last_check_error"),
         })
-    accounts_view.sort(key=lambda a: a["name"])
+
     global_fw = len(state["stats"].get("global_floodwait_events", []))
+    global_forward_fw = len(state["stats"].get("global_forward_floodwait_events", []))
     return templates.TemplateResponse(
         "index.html",
         {
@@ -173,6 +202,11 @@ async def index(request: Request, _: str = Depends(auth)):
             "quiet_hours": scheduler.QUIET_HOURS_KST,
             "global_fw": global_fw,
             "global_fw_threshold": scheduler.GLOBAL_FW_PAUSE_THRESHOLD,
+            "forward_enabled_global": forward_config.get("enabled", False),
+            "forward_initial_delay_hours": forward_config.get("initial_delay_hours", 24),
+            "forward_daily_limit": forwarder.DAILY_FORWARD_LIMIT,
+            "global_forward_fw": global_forward_fw,
+            "global_forward_fw_threshold": forwarder.FORWARD_FW_PAUSE_THRESHOLD,
         },
     )
 
@@ -210,6 +244,74 @@ async def retry_group_route(group_id: str, _: str = Depends(auth)):
 @app.get("/api/groups")
 async def api_groups(_: str = Depends(auth)):
     return storage.read_state()
+
+
+# ---------- Forward 라우트 ----------
+
+@app.post("/forward/config/{acc_name}")
+async def forward_config_account(
+    acc_name: str,
+    source_link: str = Form(""),
+    message_id: int = Form(0),
+    _: str = Depends(auth),
+):
+    if source_link.strip() and message_id > 0:
+        storage.set_forward_config_account(acc_name, source_link.strip(), int(message_id))
+        log.info("Forward config saved for account %s", acc_name)
+    else:
+        log.warning("Forward config rejected for account %s (empty)", acc_name)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/forward/initial-delay")
+async def forward_initial_delay(hours: float = Form(...), _: str = Depends(auth)):
+    storage.set_forward_initial_delay(hours)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/forward/toggle-global")
+async def forward_toggle_global(enabled: str = Form(""), _: str = Depends(auth)):
+    storage.set_forward_enabled_global(enabled.lower() in ("1", "true", "on", "yes"))
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/forward/resolve")
+async def forward_resolve(_: str = Depends(auth)):
+    accounts = [n for n, _s in discover_accounts()]
+    log.info("Resolving source channels for %d accounts...", len(accounts))
+    results = await forwarder.resolve_source_all(accounts)
+    log.info("Resolve results: %s", results)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/groups/{group_id}/forward-toggle")
+async def group_forward_toggle(
+    group_id: str,
+    enabled: str = Form(""),
+    _: str = Depends(auth),
+):
+    storage.toggle_forward(group_id, enabled.lower() in ("1", "true", "on", "yes"))
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/groups/{group_id}/forward-reset-count")
+async def group_forward_reset(group_id: str, _: str = Depends(auth)):
+    storage.reset_forward_count(group_id)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/forward/enable-all-joined")
+async def forward_enable_all_joined(_: str = Depends(auth)):
+    count = storage.enable_forward_all_joined()
+    log.info("forward_enabled turned ON for %d joined groups", count)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/forward/disable-all")
+async def forward_disable_all(_: str = Depends(auth)):
+    count = storage.disable_forward_all()
+    log.info("forward_enabled turned OFF for %d groups", count)
+    return RedirectResponse("/", status_code=303)
 
 
 @app.get("/healthz")
