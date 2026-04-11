@@ -180,6 +180,12 @@ async def index(request: Request, _: str = Depends(auth)):
             "forward_fw_count": len(acc.get("forward_floodwait_events", [])),
             "forward_pause_until": acc.get("forward_pause_until"),
             "forward_effective_limit": acc.get("forward_effective_limit"),
+            "forward_rounds_today": acc.get("forward_rounds_today", 0),
+            "forward_current_round_remaining_count": len(
+                acc.get("forward_current_round_remaining", []) or []
+            ),
+            "forward_current_round_total": acc.get("forward_current_round_total", 0),
+            "forward_next_round_at": acc.get("forward_next_round_at"),
             "source_link": fc_acc.get("source_link", ""),
             "source_message_id": fc_acc.get("source_message_id", 0),
             "source_accessible": fc_acc.get("source_accessible", False),
@@ -205,6 +211,8 @@ async def index(request: Request, _: str = Depends(auth)):
             "forward_enabled_global": forward_config.get("enabled", False),
             "forward_initial_delay_hours": forward_config.get("initial_delay_hours", 24),
             "forward_daily_limit": forwarder.DAILY_FORWARD_LIMIT,
+            "forward_daily_round_limit": forwarder.DAILY_ROUND_LIMIT,
+            "forward_round_interval_hours": forwarder.ROUND_INTERVAL_HOURS,
             "global_forward_fw": global_forward_fw,
             "global_forward_fw_threshold": forwarder.FORWARD_FW_PAUSE_THRESHOLD,
         },

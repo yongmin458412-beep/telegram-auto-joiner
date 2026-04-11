@@ -7,7 +7,7 @@ import random
 import re
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -39,6 +39,12 @@ def _empty_account_stats() -> dict[str, Any]:
         "forward_effective_limit": None,
         "forward_pause_until": None,
         "forward_last_activity": None,
+        # round 기반 전달
+        "forward_rounds_today": 0,
+        "forward_rounds_last_reset": datetime.now(timezone.utc).date().isoformat(),
+        "forward_current_round_remaining": [],
+        "forward_current_round_total": 0,
+        "forward_next_round_at": None,
     }
 
 
@@ -113,6 +119,12 @@ def _migrate(state: dict[str, Any]) -> dict[str, Any]:
         acc.setdefault("forward_effective_limit", None)
         acc.setdefault("forward_pause_until", None)
         acc.setdefault("forward_last_activity", None)
+        # round 필드
+        acc.setdefault("forward_rounds_today", 0)
+        acc.setdefault("forward_rounds_last_reset", today)
+        acc.setdefault("forward_current_round_remaining", [])
+        acc.setdefault("forward_current_round_total", 0)
+        acc.setdefault("forward_next_round_at", None)
 
     # 그룹 필드 마이그레이션
     for g in state.get("groups", []):
@@ -619,6 +631,60 @@ def maybe_reset_forward_counters(state: dict[str, Any], acc_name: str) -> None:
     if acc.get("forward_last_reset") != today:
         acc["forwarded_today"] = 0
         acc["forward_last_reset"] = today
+    if acc.get("forward_rounds_last_reset") != today:
+        acc["forward_rounds_today"] = 0
+        acc["forward_rounds_last_reset"] = today
+
+
+def start_new_round(acc_name: str, target_ids: list[str]) -> None:
+    state = read_state()
+    acc = ensure_account(state, acc_name)
+    acc["forward_current_round_remaining"] = list(target_ids)
+    acc["forward_current_round_total"] = len(target_ids)
+    acc["forward_next_round_at"] = None
+    write_state(state)
+
+
+def pop_round_target(acc_name: str) -> Optional[str]:
+    """현재 라운드에서 다음 처리할 group_id 를 원자적으로 꺼냄."""
+    with _lock:
+        _ensure_file()
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        state = _migrate(state)
+        acc = state["stats"]["accounts"].get(acc_name)
+        if not acc:
+            return None
+        remaining = acc.get("forward_current_round_remaining", [])
+        if not remaining:
+            return None
+        gid = remaining.pop(0)
+        acc["forward_current_round_remaining"] = remaining
+        _atomic_write(state)
+        return gid
+
+
+def complete_round(acc_name: str, interval_hours: float) -> int:
+    """라운드 1개 완료 처리. 다음 라운드 시각 설정."""
+    state = read_state()
+    acc = ensure_account(state, acc_name)
+    acc["forward_rounds_today"] = int(acc.get("forward_rounds_today", 0)) + 1
+    next_at = (
+        datetime.now(timezone.utc) + timedelta(hours=interval_hours)
+    ).isoformat()
+    acc["forward_next_round_at"] = next_at
+    acc["forward_current_round_remaining"] = []
+    acc["forward_current_round_total"] = 0
+    write_state(state)
+    return acc["forward_rounds_today"]
+
+
+def get_group_by_id(group_id: str) -> Optional[dict[str, Any]]:
+    state = read_state()
+    for g in state["groups"]:
+        if g["id"] == group_id:
+            return dict(g)
+    return None
 
 
 def record_forward_floodwait(state: dict[str, Any], acc_name: str) -> None:

@@ -96,12 +96,22 @@
       <div class="row">가입 시간: <b>{{ a.joined_this_hour }}</b>{% if hourly_limit > 0 %} / {{ hourly_limit }}{% endif %}</div>
       <div class="row {% if a.fw_count > 0 %}err{% endif %}">가입 FW(24h): <b>{{ a.fw_count }}</b></div>
       <hr style="border:0;border-top:1px dashed #ddd;margin:0.4rem 0;">
-      <div class="row">전달 오늘: <b>{{ a.forwarded_today }}</b> / {{ forward_daily_limit }}
-        {% if a.forward_effective_limit is not none and a.forward_effective_limit != forward_daily_limit %}
+      <div class="row">라운드 오늘: <b>{{ a.forward_rounds_today }}</b> / {{ forward_daily_round_limit }}
+        {% if a.forward_effective_limit is not none and a.forward_effective_limit != forward_daily_round_limit %}
           <span class="err">(→{{ a.forward_effective_limit }})</span>
         {% endif %}
       </div>
-      <div class="row">전달 누적: <b>{{ a.forwarded_total }}</b></div>
+      {% if a.forward_current_round_total > 0 %}
+      <div class="row">현재 라운드 진행:
+        <b>{{ a.forward_current_round_total - a.forward_current_round_remaining_count }}</b>
+        / {{ a.forward_current_round_total }}
+      </div>
+      {% elif a.forward_next_round_at %}
+      <div class="row" style="color:#888;font-size:0.72rem;">
+        다음 라운드: {{ a.forward_next_round_at[:19].replace('T',' ') }}
+      </div>
+      {% endif %}
+      <div class="row">전달 누적: <b>{{ a.forwarded_total }}</b> (오늘 {{ a.forwarded_today }})</div>
       <div class="row {% if a.forward_fw_count > 0 %}err{% endif %}">전달 FW(24h): <b>{{ a.forward_fw_count }}</b></div>
       <div class="row">소스:
         {% if a.source_link %}
@@ -131,7 +141,7 @@
         {% if forward_enabled_global %}전체 OFF{% else %}전체 ON{% endif %}
       </button>
     </form>
-    <span class="stat">전달 daily: <strong>{{ forward_daily_limit }}</strong>/계정</span>
+    <span class="stat">라운드: <strong>{{ forward_daily_round_limit }}</strong>회/일 (매 {{ forward_round_interval_hours }}시간)</span>
     <span class="stat {% if global_forward_fw > 0 %}warn{% endif %}">
       전달 전역 FW(24h): <strong>{{ global_forward_fw }}</strong>/{{ global_forward_fw_threshold }}
     </span>

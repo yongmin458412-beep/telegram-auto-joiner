@@ -1,4 +1,8 @@
-"""메시지 반복 전달 워커 풀 (계정별 1개)."""
+"""메시지 라운드 기반 전달 워커 풀.
+
+1 라운드 = forward_enabled 그룹 전체에 순차 전달 (계정별).
+하루에 DAILY_ROUND_LIMIT 만큼 라운드 반복.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -12,9 +16,17 @@ from .telegram_client import forward_and_counter, resolve_source_channel
 
 log = logging.getLogger("forwarder")
 
-DAILY_FORWARD_LIMIT = int(os.environ.get("DAILY_FORWARD_LIMIT", "10"))
-FORWARD_DELAY_MIN = int(os.environ.get("FORWARD_DELAY_MIN", "600"))    # 10분
-FORWARD_DELAY_MAX = int(os.environ.get("FORWARD_DELAY_MAX", "2400"))   # 40분
+# 라운드 기반 설정
+DAILY_ROUND_LIMIT = int(os.environ.get("DAILY_ROUND_LIMIT", "10"))
+ROUND_INTERVAL_HOURS = float(os.environ.get("ROUND_INTERVAL_HOURS", "2.4"))
+
+# 라운드 내 그룹 간 딜레이 (burst 회피)
+WITHIN_ROUND_DELAY_MIN = int(os.environ.get("WITHIN_ROUND_DELAY_MIN", "30"))
+WITHIN_ROUND_DELAY_MAX = int(os.environ.get("WITHIN_ROUND_DELAY_MAX", "90"))
+
+# 절대 안전 한도 (0 = 없음)
+DAILY_FORWARD_LIMIT = int(os.environ.get("DAILY_FORWARD_LIMIT", "0"))
+
 FORWARD_INITIAL_DELAY_HOURS = float(os.environ.get("FORWARD_INITIAL_DELAY_HOURS", "24"))
 FORWARD_FW_PAUSE_THRESHOLD = int(os.environ.get("FORWARD_FW_PAUSE_THRESHOLD", "6"))
 FORWARD_START_JITTER_MAX = int(os.environ.get("FORWARD_START_JITTER_MAX", "300"))
@@ -33,13 +45,10 @@ async def _sleep(seconds: float) -> None:
         pass
 
 
-def _effective_daily_limit(state: dict, acc_name: str) -> int:
-    """반환: -1=무제한 없음(고정한도), 0=정지, N=해당 한도.
-    DAILY_FORWARD_LIMIT 가 0이면 전달 기능 자체가 비활성이지만,
-    여기서는 한도가 10처럼 고정값이라 가정.
-    """
+def _effective_round_limit(state: dict, acc_name: str) -> int:
+    """FloodWait 누적에 따른 라운드 한도 자동 스로틀."""
     fw = storage.prune_forward_floodwait(state, acc_name)
-    base = DAILY_FORWARD_LIMIT
+    base = DAILY_ROUND_LIMIT
     if fw >= 4:
         return 0
     if fw == 3:
@@ -81,13 +90,89 @@ async def resolve_source_all(account_names: list[str]) -> dict[str, dict]:
     return results
 
 
+async def _forward_one_group(
+    group_id: str, account_name: str, source_chat_id: int, source_msg_id: int
+) -> None:
+    """단일 그룹에 대해 forward + counter 메시지 전송 + 결과 기록."""
+    g = storage.get_group_by_id(group_id)
+    if not g:
+        log.info("[%s] group %s no longer exists, skip.", account_name, group_id)
+        return
+    if not g.get("forward_enabled"):
+        log.info("[%s] group %s forward_enabled=False, skip.", account_name, group_id)
+        return
+    if g.get("worker") != account_name:
+        log.info(
+            "[%s] group %s owned by worker %s, skip.",
+            account_name, group_id, g.get("worker"),
+        )
+        return
+
+    current_count = int(g.get("forward_count", 0))
+    next_count = current_count + 1
+    counter_text = f"{next_count}회"
+
+    log.info(
+        "[%s] Forwarding to %s (round target, count -> %d)",
+        account_name, g["link"], next_count,
+    )
+    ok, err, flood, disable = await forward_and_counter(
+        account_name=account_name,
+        target_link=g["link"],
+        source_chat_id=source_chat_id,
+        source_message_id=source_msg_id,
+        counter_text=counter_text,
+    )
+
+    if flood is not None:
+        state = storage.read_state()
+        storage.record_forward_floodwait(state, account_name)
+        storage.write_state(state)
+        log.warning(
+            "[%s] FloodWait %ds on %s. Waiting (+30s).",
+            account_name, flood, g["link"],
+        )
+        await _sleep(flood + 30)
+        return
+
+    if ok:
+        storage.record_forward_success(group_id, account_name)
+        if err:
+            storage.record_forward_error(group_id, err, disable=False)
+        log.info(
+            "[%s] Forward OK: %s (#%d) note=%s",
+            account_name, g["link"], next_count, err,
+        )
+    else:
+        if disable:
+            storage.delete_group(group_id)
+            log.warning(
+                "[%s] Forward FAIL & DELETED: %s err=%s",
+                account_name, g["link"], err,
+            )
+        else:
+            storage.record_forward_error(group_id, err or "unknown", disable=False)
+            log.warning(
+                "[%s] Forward FAIL: %s err=%s",
+                account_name, g["link"], err,
+            )
+            if err and (
+                "source message id invalid" in err
+                or "source channel private" in err
+            ):
+                storage.set_source_resolved(account_name, None, False, err)
+
+
 async def run_forward_worker(account_name: str) -> None:
     jitter = random.randint(0, FORWARD_START_JITTER_MAX)
     log.info("[%s] Forward worker starting in %ds.", account_name, jitter)
     await _sleep(jitter)
     if _stop.is_set():
         return
-    log.info("[%s] Forward worker active.", account_name)
+    log.info(
+        "[%s] Forward worker active. rounds/day=%d interval=%sh",
+        account_name, DAILY_ROUND_LIMIT, ROUND_INTERVAL_HOURS,
+    )
 
     while not _stop.is_set():
         try:
@@ -99,7 +184,7 @@ async def run_forward_worker(account_name: str) -> None:
                 await _sleep(60)
                 continue
 
-            # 계정별 forward 카운터 리셋
+            # 계정별 카운터 리셋
             storage.maybe_reset_forward_counters(state, account_name)
             storage.write_state(state)
 
@@ -113,9 +198,9 @@ async def run_forward_worker(account_name: str) -> None:
                 await _sleep(3600)
                 continue
 
-            # 계정별 pause_until
-            acc_stats = state["stats"]["accounts"].get(account_name, {})
-            pu = acc_stats.get("forward_pause_until")
+            # 계정별 pause
+            acc = state["stats"]["accounts"].get(account_name, {})
+            pu = acc.get("forward_pause_until")
             if pu:
                 try:
                     pu_dt = datetime.fromisoformat(pu.replace("Z", "+00:00"))
@@ -131,18 +216,16 @@ async def run_forward_worker(account_name: str) -> None:
                     state["stats"]["accounts"][account_name]["forward_pause_until"] = None
                     storage.write_state(state)
 
-            # 자동 스로틀된 한도
-            eff_limit = _effective_daily_limit(state, account_name)
+            # 라운드 자동 스로틀
+            eff_rounds = _effective_round_limit(state, account_name)
             state = storage.read_state()
             state["stats"]["accounts"].setdefault(account_name, {})[
                 "forward_effective_limit"
-            ] = eff_limit
+            ] = eff_rounds
             storage.write_state(state)
 
-            if eff_limit == 0:
-                log.warning(
-                    "[%s] Forward FW 4+. Pausing 24h.", account_name
-                )
+            if eff_rounds == 0:
+                log.warning("[%s] Forward FW 4+. Pausing 24h.", account_name)
                 pause_until = (
                     datetime.now(timezone.utc) + timedelta(hours=24)
                 ).isoformat()
@@ -153,17 +236,27 @@ async def run_forward_worker(account_name: str) -> None:
                 storage.write_state(state)
                 continue
 
+            # 일일 라운드 한도 체크
             acc = state["stats"]["accounts"].get(account_name, {})
-            forwarded_today = acc.get("forwarded_today", 0)
-            if forwarded_today >= eff_limit:
+            rounds_today = int(acc.get("forward_rounds_today", 0))
+            if rounds_today >= eff_rounds:
                 log.info(
-                    "[%s] Forward daily limit %d reached (today=%d). Sleeping 1h.",
-                    account_name, eff_limit, forwarded_today,
+                    "[%s] Daily rounds %d/%d reached. Sleeping 1h.",
+                    account_name, rounds_today, eff_rounds,
                 )
                 await _sleep(3600)
                 continue
 
-            # 계정 설정 확인
+            # 절대 안전 한도 (DAILY_FORWARD_LIMIT>0 이면)
+            if DAILY_FORWARD_LIMIT > 0 and acc.get("forwarded_today", 0) >= DAILY_FORWARD_LIMIT:
+                log.info(
+                    "[%s] Absolute forward limit %d reached. Sleeping 1h.",
+                    account_name, DAILY_FORWARD_LIMIT,
+                )
+                await _sleep(3600)
+                continue
+
+            # 계정 소스 확인
             acc_cfg = fc.get("accounts", {}).get(account_name)
             if not acc_cfg or not acc_cfg.get("source_accessible"):
                 await _sleep(120)
@@ -174,73 +267,69 @@ async def run_forward_worker(account_name: str) -> None:
                 await _sleep(120)
                 continue
 
-            # 다음 대상 선정
-            initial_delay = float(fc.get("initial_delay_hours", 24))
-            targets = storage.get_forward_targets(account_name, initial_delay)
-            if not targets:
-                await _sleep(300)
-                continue
+            # 현재 라운드 상태 체크
+            remaining = acc.get("forward_current_round_remaining", [])
+            next_round_at = acc.get("forward_next_round_at")
 
-            target = targets[0]
-            current_count = int(target.get("forward_count", 0))
-            next_count = current_count + 1
-            counter_text = f"{next_count}회"
+            if not remaining:
+                # 다음 라운드 시각까지 대기 필요?
+                if next_round_at:
+                    try:
+                        nr_dt = datetime.fromisoformat(next_round_at.replace("Z", "+00:00"))
+                    except Exception:
+                        nr_dt = None
+                    if nr_dt and nr_dt > datetime.now(timezone.utc):
+                        wait_s = int((nr_dt - datetime.now(timezone.utc)).total_seconds())
+                        log.info(
+                            "[%s] Waiting %ds until next round (%s).",
+                            account_name, wait_s, next_round_at,
+                        )
+                        await _sleep(min(wait_s, 3600))
+                        continue
 
-            log.info(
-                "[%s] Forwarding to %s (count -> %d)",
-                account_name, target["link"], next_count,
-            )
-            ok, err, flood, disable = await forward_and_counter(
-                account_name=account_name,
-                target_link=target["link"],
-                source_chat_id=source_chat_id,
-                source_message_id=source_msg_id,
-                counter_text=counter_text,
-            )
-
-            # FloodWait 기록
-            if flood is not None:
-                state = storage.read_state()
-                storage.record_forward_floodwait(state, account_name)
-                storage.write_state(state)
-                await _sleep(flood + 30)
-                continue
-
-            if ok:
-                storage.record_forward_success(target["id"], account_name)
-                if err:
-                    storage.record_forward_error(target["id"], err, disable=False)
+                # 새 라운드 시작
+                initial_delay = float(fc.get("initial_delay_hours", 24))
+                targets = storage.get_forward_targets(account_name, initial_delay)
+                if not targets:
+                    log.info("[%s] No targets for new round. Sleeping 5min.", account_name)
+                    await _sleep(300)
+                    continue
+                target_ids = [t["id"] for t in targets]
+                storage.start_new_round(account_name, target_ids)
                 log.info(
-                    "[%s] Forward OK: %s (#%d) note=%s",
-                    account_name, target["link"], next_count, err,
+                    "[%s] ▶ Round %d/%d START with %d groups.",
+                    account_name, rounds_today + 1, eff_rounds, len(target_ids),
+                )
+                # 바로 다음 루프 반복에서 pop 시작
+
+            # 라운드 내 그룹 1개 처리
+            gid = storage.pop_round_target(account_name)
+            if gid is None:
+                # 라운드 종료 직전에 누군가 remaining을 비웠을 수 있음
+                continue
+
+            await _forward_one_group(
+                gid, account_name, source_chat_id, source_msg_id
+            )
+
+            # 라운드가 끝났는지 확인
+            state = storage.read_state()
+            acc = state["stats"]["accounts"].get(account_name, {})
+            if not acc.get("forward_current_round_remaining"):
+                completed = storage.complete_round(account_name, ROUND_INTERVAL_HOURS)
+                next_at = (
+                    datetime.now(timezone.utc)
+                    + timedelta(hours=ROUND_INTERVAL_HOURS)
+                ).isoformat()
+                log.info(
+                    "[%s] ✅ Round %d/%d COMPLETE. Next round at %s.",
+                    account_name, completed, eff_rounds, next_at,
                 )
             else:
-                # 영구적 실패(쓰기 금지/차단) → 그룹 자동 삭제
-                if disable:
-                    storage.delete_group(target["id"])
-                    log.warning(
-                        "[%s] Forward FAIL & DELETED: %s err=%s",
-                        account_name, target["link"], err,
-                    )
-                else:
-                    storage.record_forward_error(target["id"], err or "unknown", disable=False)
-                    log.warning(
-                        "[%s] Forward FAIL: %s err=%s",
-                        account_name, target["link"], err,
-                    )
-                    # 소스 관련 에러 힌트
-                    if err and (
-                        "source message id invalid" in err
-                        or "source channel private" in err
-                    ):
-                        storage.set_source_resolved(
-                            account_name, None, False, err
-                        )
-
-            # 다음까지 대기
-            delay = random.randint(FORWARD_DELAY_MIN, FORWARD_DELAY_MAX)
-            log.info("[%s] Forward sleeping %ds.", account_name, delay)
-            await _sleep(delay)
+                # 라운드 내 다음 그룹까지 짧은 딜레이
+                delay = random.randint(WITHIN_ROUND_DELAY_MIN, WITHIN_ROUND_DELAY_MAX)
+                log.info("[%s] Within-round sleep %ds.", account_name, delay)
+                await _sleep(delay)
         except Exception as e:
             log.exception("[%s] Forward loop error: %s", account_name, e)
             await _sleep(60)
