@@ -92,21 +92,24 @@ async def resolve_source_all(account_names: list[str]) -> dict[str, dict]:
 
 async def _forward_one_group(
     group_id: str, account_name: str, source_chat_id: int, source_msg_id: int
-) -> None:
-    """단일 그룹에 대해 forward + counter 메시지 전송 + 결과 기록."""
+) -> bool:
+    """단일 그룹에 대해 forward + counter 메시지 전송 + 결과 기록.
+
+    Returns: True 성공, False 실패/건너뜀 (딜레이 없이 바로 다음으로 진행).
+    """
     g = storage.get_group_by_id(group_id)
     if not g:
         log.info("[%s] group %s no longer exists, skip.", account_name, group_id)
-        return
+        return False
     if not g.get("forward_enabled"):
         log.info("[%s] group %s forward_enabled=False, skip.", account_name, group_id)
-        return
+        return False
     if g.get("worker") != account_name:
         log.info(
             "[%s] group %s owned by worker %s, skip.",
             account_name, group_id, g.get("worker"),
         )
-        return
+        return False
 
     current_count = int(g.get("forward_count", 0))
     next_count = current_count + 1
@@ -133,7 +136,7 @@ async def _forward_one_group(
             account_name, flood, g["link"],
         )
         await _sleep(flood + 30)
-        return
+        return False
 
     if ok:
         storage.record_forward_success(group_id, account_name)
@@ -143,6 +146,7 @@ async def _forward_one_group(
             "[%s] Forward OK: %s (#%d) note=%s",
             account_name, g["link"], next_count, err,
         )
+        return True
     else:
         if disable:
             storage.delete_group(group_id)
@@ -161,6 +165,7 @@ async def _forward_one_group(
                 or "source channel private" in err
             ):
                 storage.set_source_resolved(account_name, None, False, err)
+        return False
 
 
 async def run_forward_worker(account_name: str) -> None:
@@ -308,7 +313,7 @@ async def run_forward_worker(account_name: str) -> None:
                 # 라운드 종료 직전에 누군가 remaining을 비웠을 수 있음
                 continue
 
-            await _forward_one_group(
+            forwarded_ok = await _forward_one_group(
                 gid, account_name, source_chat_id, source_msg_id
             )
 
@@ -325,11 +330,14 @@ async def run_forward_worker(account_name: str) -> None:
                     "[%s] ✅ Round %d/%d COMPLETE. Next round at %s.",
                     account_name, completed, eff_rounds, next_at,
                 )
-            else:
-                # 라운드 내 다음 그룹까지 짧은 딜레이
+            elif forwarded_ok:
+                # 성공했을 때만 within-round 딜레이
                 delay = random.randint(WITHIN_ROUND_DELAY_MIN, WITHIN_ROUND_DELAY_MAX)
                 log.info("[%s] Within-round sleep %ds.", account_name, delay)
                 await _sleep(delay)
+            else:
+                # 실패/건너뜀 → 딜레이 없이 바로 다음 그룹으로
+                log.info("[%s] Skip delay (prev failed/skipped), next immediately.", account_name)
         except Exception as e:
             log.exception("[%s] Forward loop error: %s", account_name, e)
             await _sleep(60)
