@@ -215,19 +215,27 @@ async def run_forward_worker(account_name: str) -> None:
                     account_name, target["link"], next_count, err,
                 )
             else:
-                storage.record_forward_error(target["id"], err or "unknown", disable=disable)
-                log.warning(
-                    "[%s] Forward FAIL: %s err=%s disable=%s",
-                    account_name, target["link"], err, disable,
-                )
-                # 소스 관련 에러 힌트
-                if err and (
-                    "source message id invalid" in err
-                    or "source channel private" in err
-                ):
-                    storage.set_source_resolved(
-                        account_name, None, False, err
+                # 영구적 실패(쓰기 금지/차단) → 그룹 자동 삭제
+                if disable:
+                    storage.delete_group(target["id"])
+                    log.warning(
+                        "[%s] Forward FAIL & DELETED: %s err=%s",
+                        account_name, target["link"], err,
                     )
+                else:
+                    storage.record_forward_error(target["id"], err or "unknown", disable=False)
+                    log.warning(
+                        "[%s] Forward FAIL: %s err=%s",
+                        account_name, target["link"], err,
+                    )
+                    # 소스 관련 에러 힌트
+                    if err and (
+                        "source message id invalid" in err
+                        or "source channel private" in err
+                    ):
+                        storage.set_source_resolved(
+                            account_name, None, False, err
+                        )
 
             # 다음까지 대기
             delay = random.randint(FORWARD_DELAY_MIN, FORWARD_DELAY_MAX)
