@@ -205,13 +205,22 @@ async def run_worker(account_name: str) -> None:
                 await _sleep(flood + 30)
                 continue
 
-            # 결과 기록
-            storage.finalize_group(target["id"], ok, title, err, account_name)
             if ok:
+                storage.finalize_group(target["id"], ok, title, err, account_name)
                 state = storage.read_state()
                 storage.bump_join_counters(state, account_name)
                 storage.write_state(state)
-            log.info("[%s] Result %s: ok=%s err=%s", account_name, link, ok, err)
+                log.info("[%s] Result %s: ok=%s err=%s", account_name, link, ok, err)
+            else:
+                # 입장 실패 → 그룹 자동 삭제 (ChannelsTooMuch 같은 계정 이슈 제외)
+                err_lower = (err or "").lower()
+                keep_as_failed = "too many channels" in err_lower
+                if keep_as_failed:
+                    storage.finalize_group(target["id"], ok, title, err, account_name)
+                    log.warning("[%s] Join FAIL (kept): %s err=%s", account_name, link, err)
+                else:
+                    storage.delete_group(target["id"])
+                    log.warning("[%s] Join FAIL & DELETED: %s err=%s", account_name, link, err)
 
             # 다음 시도까지 대기
             delay = random.randint(JOIN_DELAY_MIN, JOIN_DELAY_MAX)
