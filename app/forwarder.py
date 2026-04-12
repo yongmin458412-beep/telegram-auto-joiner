@@ -335,8 +335,8 @@ async def run_forward_worker(account_name: str) -> None:
                 initial_delay = float(fc.get("initial_delay_hours", 24))
                 targets = storage.get_forward_targets(account_name, initial_delay)
                 if not targets:
-                    log.info("[%s] No targets for new round. Sleeping 5min.", account_name)
-                    await _sleep(300)
+                    log.info("[%s] No targets for new round. Sleeping 2min.", account_name)
+                    await _sleep(120)
                     continue
                 target_ids = [t["id"] for t in targets]
                 storage.start_new_round(account_name, target_ids)
@@ -361,14 +361,24 @@ async def run_forward_worker(account_name: str) -> None:
             state = storage.read_state()
             acc = state["stats"]["accounts"].get(account_name, {})
             if not acc.get("forward_current_round_remaining"):
-                completed = storage.complete_round(account_name, ROUND_INTERVAL_HOURS)
+                round_size = acc.get("forward_current_round_total", 0)
+                # 라운드가 너무 작으면 (< 5개) 10분 뒤 재시도 (그룹이 아직 join 중일 수 있음)
+                if round_size < 5:
+                    interval = 10 / 60  # 10분
+                    log.info(
+                        "[%s] Round too small (%d groups). Retry in 10min.",
+                        account_name, round_size,
+                    )
+                else:
+                    interval = ROUND_INTERVAL_HOURS
+                completed = storage.complete_round(account_name, interval)
                 next_at = (
                     datetime.now(timezone.utc)
-                    + timedelta(hours=ROUND_INTERVAL_HOURS)
+                    + timedelta(hours=interval)
                 ).isoformat()
                 log.info(
-                    "[%s] ✅ Round %d/%d COMPLETE. Next round at %s.",
-                    account_name, completed, eff_rounds, next_at,
+                    "[%s] ✅ Round %d/%d COMPLETE (%d groups). Next at %s.",
+                    account_name, completed, eff_rounds, round_size, next_at,
                 )
             elif forwarded_ok:
                 # 성공했을 때만 within-round 딜레이
