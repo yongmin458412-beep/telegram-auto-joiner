@@ -86,6 +86,9 @@ async def lifespan(app: FastAPI):
             acc["forward_current_round_total"] = 0
             acc["forward_next_round_at"] = None
             acc["forward_rounds_today"] = 0
+            acc["forward_floodwait_events"] = []
+            acc["forward_pause_until"] = None
+        state_fwd["stats"]["global_forward_floodwait_events"] = []
         for g in state_fwd["groups"]:
             if g.get("last_forward_error"):
                 g["last_forward_error"] = None
