@@ -77,19 +77,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.error("Release stale failed: %s", e)
 
-    # worker=None 인 joined 그룹들을 계정 1에 임시 배정
+    # 활성 계정 목록 확인, 비활성 계정의 joined 그룹 → pending으로 리셋
     try:
+        active_names = {name for name, _ in accounts}
         state_fix = storage.read_state()
         reassigned = 0
         for g in state_fix["groups"]:
-            if g.get("status") == "joined" and not g.get("worker"):
-                g["worker"] = "1"
+            w = g.get("worker")
+            if g.get("status") == "joined" and (not w or w not in active_names):
+                g["status"] = "pending"
+                g["worker"] = None
+                g["claimed_by"] = None
+                g["joined_at"] = None
                 reassigned += 1
         if reassigned:
             storage.write_state(state_fix)
-            log.info("Reassigned %d worker=None groups to account #1.", reassigned)
+            log.info("Reset %d groups from inactive accounts to pending.", reassigned)
     except Exception as e:
-        log.error("Worker reassign failed: %s", e)
+        log.error("Account cleanup failed: %s", e)
 
     # 재배포 시: failed 정리 + forward 상태 초기화 + joined에 forward_enabled 자동 적용
     try:
