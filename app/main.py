@@ -91,10 +91,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.error("Worker reassign failed: %s", e)
 
-    # 재배포 시 forward 라운드 상태 + 에러 초기화 (깨끗하게 재시작)
+    # 재배포 시: failed 정리 + forward 상태 초기화 + joined에 forward_enabled 자동 적용
     try:
         state_fwd = storage.read_state()
-        reset_count = 0
+        # failed 그룹 삭제 (이전 실패 기록 정리)
+        before = len(state_fwd["groups"])
+        state_fwd["groups"] = [
+            g for g in state_fwd["groups"] if g.get("status") != "failed"
+        ]
+        deleted_failed = before - len(state_fwd["groups"])
+        # forward 라운드 + FW 초기화
         for acc in state_fwd["stats"]["accounts"].values():
             acc["forward_current_round_remaining"] = []
             acc["forward_current_round_total"] = 0
@@ -103,13 +109,22 @@ async def lifespan(app: FastAPI):
             acc["forward_floodwait_events"] = []
             acc["forward_pause_until"] = None
         state_fwd["stats"]["global_forward_floodwait_events"] = []
+        # forward 에러 초기화 + joined에 forward_enabled 자동 ON
+        reset_count = 0
+        auto_fwd_count = 0
+        fc_enabled = state_fwd.get("forward_config", {}).get("enabled", False)
         for g in state_fwd["groups"]:
             if g.get("last_forward_error"):
                 g["last_forward_error"] = None
                 reset_count += 1
+            if g.get("status") == "joined" and fc_enabled and not g.get("forward_enabled"):
+                g["forward_enabled"] = True
+                auto_fwd_count += 1
         storage.write_state(state_fwd)
-        if reset_count:
-            log.info("Reset %d forward errors + round state for fresh start.", reset_count)
+        log.info(
+            "Startup cleanup: deleted %d failed, reset %d fwd errors, auto-enabled %d fwd.",
+            deleted_failed, reset_count, auto_fwd_count,
+        )
     except Exception as e:
         log.error("Forward state reset failed: %s", e)
 

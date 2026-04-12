@@ -334,6 +334,8 @@ def finalize_group(
 ) -> None:
     state = read_state()
     now = datetime.now(timezone.utc).isoformat()
+    fc = state.get("forward_config", {})
+    auto_fwd = fc.get("enabled", False)
     for g in state["groups"]:
         if g["id"] == group_id:
             if ok:
@@ -341,6 +343,9 @@ def finalize_group(
                 g["joined_at"] = now
                 g["title"] = title
                 g["error"] = error
+                # forward가 전역 ON이면 자동으로 forward_enabled도 켜기
+                if auto_fwd:
+                    g["forward_enabled"] = True
             else:
                 g["status"] = "failed"
                 g["error"] = error
