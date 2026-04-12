@@ -91,7 +91,7 @@ async def resolve_source_all(account_names: list[str]) -> dict[str, dict]:
 
 
 async def _forward_one_group(
-    group_id: str, account_name: str, source_chat_id: int, source_msg_id: int
+    group_id: str, account_name: str, source_link: str, source_msg_id: int
 ) -> bool:
     """단일 그룹에 대해 forward + counter 메시지 전송 + 결과 기록.
 
@@ -122,7 +122,7 @@ async def _forward_one_group(
     ok, err, flood, disable = await forward_and_counter(
         account_name=account_name,
         target_link=g["link"],
-        source_chat_id=source_chat_id,
+        source_link=source_link,
         source_message_id=source_msg_id,
         counter_text=counter_text,
     )
@@ -266,9 +266,9 @@ async def run_forward_worker(account_name: str) -> None:
             if not acc_cfg or not acc_cfg.get("source_accessible"):
                 await _sleep(120)
                 continue
-            source_chat_id = acc_cfg.get("source_chat_id")
+            source_link = acc_cfg.get("source_link", "")
             source_msg_id = acc_cfg.get("source_message_id")
-            if not source_chat_id or not source_msg_id:
+            if not source_link or not source_msg_id:
                 await _sleep(120)
                 continue
 
@@ -314,7 +314,7 @@ async def run_forward_worker(account_name: str) -> None:
                 continue
 
             forwarded_ok = await _forward_one_group(
-                gid, account_name, source_chat_id, source_msg_id
+                gid, account_name, source_link, source_msg_id
             )
 
             # 라운드가 끝났는지 확인

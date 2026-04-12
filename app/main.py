@@ -77,6 +77,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.error("Release stale failed: %s", e)
 
+    # 재배포 시 forward 라운드 상태 + 에러 초기화 (깨끗하게 재시작)
+    try:
+        state_fwd = storage.read_state()
+        reset_count = 0
+        for acc in state_fwd["stats"]["accounts"].values():
+            acc["forward_current_round_remaining"] = []
+            acc["forward_current_round_total"] = 0
+            acc["forward_next_round_at"] = None
+            acc["forward_rounds_today"] = 0
+        for g in state_fwd["groups"]:
+            if g.get("last_forward_error"):
+                g["last_forward_error"] = None
+                reset_count += 1
+        storage.write_state(state_fwd)
+        if reset_count:
+            log.info("Reset %d forward errors + round state for fresh start.", reset_count)
+    except Exception as e:
+        log.error("Forward state reset failed: %s", e)
+
     # 시드 자동 주입
     try:
         state_now = storage.read_state()

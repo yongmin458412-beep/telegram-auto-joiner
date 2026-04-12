@@ -230,7 +230,7 @@ async def resolve_source_channel(
 async def forward_and_counter(
     account_name: str,
     target_link: str,
-    source_chat_id: int,
+    source_link: str,
     source_message_id: int,
     counter_text: str,
 ) -> tuple[bool, Optional[str], Optional[int], bool]:
@@ -249,12 +249,20 @@ async def forward_and_counter(
     except Exception as e:
         return False, f"resolve target: {type(e).__name__}: {e}", None, False
 
+    # 소스 채널을 링크(문자열)로 해석 — 재배포 후 캐시 유실 대비
+    try:
+        source_entity = await client.get_entity(source_link)
+    except FloodWaitError as e:
+        return False, f"flood wait {e.seconds}s (resolve source)", int(e.seconds), False
+    except Exception as e:
+        return False, f"resolve source: {type(e).__name__}: {e}", None, False
+
     # 1) 원본 메시지 전달
     try:
         await client.forward_messages(
             entity=target_entity,
             messages=source_message_id,
-            from_peer=source_chat_id,
+            from_peer=source_entity,
         )
     except FloodWaitError as e:
         return False, f"flood wait {e.seconds}s (forward)", int(e.seconds), False
