@@ -269,9 +269,11 @@ async def forward_and_counter(
     except FloodWaitError as e:
         return False, f"flood wait {e.seconds}s (forward)", int(e.seconds), False
     except (ChatWriteForbiddenError, UserBannedInChannelError, ChatAdminRequiredError):
-        return False, "write forbidden / banned / admin required", None, True
+        # forward에서 쓰기 금지 → disable=False (direct fallback 기회 줌)
+        return False, "forward: write forbidden / admin required", None, False
     except ChatForwardsRestrictedError:
-        return False, "target group has forwarding restricted", None, True
+        # 전달만 금지, 직접 메시지는 가능할 수 있음 → disable=False
+        return False, "forward: forwarding restricted", None, False
     except SlowModeWaitError as e:
         return False, f"slow mode {e.seconds}s", int(e.seconds), False
     except MessageIdInvalidError:
@@ -280,9 +282,7 @@ async def forward_and_counter(
         return False, "source channel private", None, False
     except Exception as e:
         err_name = type(e).__name__
-        # Restricted/Forbidden 계열은 전부 영구 실패 → 삭제 대상
-        if "Restricted" in err_name or "Forbidden" in err_name or "Admin" in err_name:
-            return False, f"{err_name}: {e}", None, True
+        # forward 실패는 disable=False → direct fallback 기회
         return False, f"forward: {err_name}: {e}", None, False
 
     # 2) 짧은 대기 후 카운터 메시지
