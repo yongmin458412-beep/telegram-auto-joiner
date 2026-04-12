@@ -119,25 +119,40 @@ async def _forward_one_group(
     next_count = current_count + 1
     counter_text = f"{next_count}회"
 
-    use_direct = bool(direct_message)
-    mode = "direct" if use_direct else "forward"
-    log.info(
-        "[%s] %s to %s (count -> %d)",
-        account_name, mode.upper(), g["link"], next_count,
-    )
-    if use_direct:
+    # 전략: forward 먼저 시도 → 실패하면 direct message fallback
+    has_source = bool(source_link and source_msg_id)
+    has_direct = bool(direct_message)
+
+    ok, err, flood, disable = False, None, None, False
+
+    # 1차: forward 시도
+    if has_source:
+        log.info("[%s] FORWARD to %s (count -> %d)", account_name, g["link"], next_count)
+        ok, err, flood, disable = await forward_and_counter(
+            account_name=account_name,
+            target_link=g["link"],
+            source_link=source_link,
+            source_message_id=source_msg_id,
+            counter_text=counter_text,
+        )
+
+    # 2차: forward 실패 + direct message 있으면 fallback
+    if not ok and not disable and flood is None and has_direct:
+        log.info("[%s] Forward failed, DIRECT fallback to %s", account_name, g["link"])
         ok, err, flood, disable = await send_direct_and_counter(
             account_name=account_name,
             target_link=g["link"],
             message_text=direct_message,
             counter_text=counter_text,
         )
-    else:
-        ok, err, flood, disable = await forward_and_counter(
+
+    # 둘 다 없으면 direct만 시도
+    if not has_source and has_direct and not ok and flood is None:
+        log.info("[%s] DIRECT to %s (count -> %d)", account_name, g["link"], next_count)
+        ok, err, flood, disable = await send_direct_and_counter(
             account_name=account_name,
             target_link=g["link"],
-            source_link=source_link,
-            source_message_id=source_msg_id,
+            message_text=direct_message,
             counter_text=counter_text,
         )
 
