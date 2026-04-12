@@ -56,6 +56,7 @@ def _empty_forward_account() -> dict[str, Any]:
         "source_accessible": False,
         "last_check": None,
         "last_check_error": None,
+        "direct_message": "",  # 비어있으면 forward, 있으면 직접 send
     }
 
 
@@ -449,6 +450,17 @@ def prune_global_floodwait(state: dict[str, Any]) -> int:
 
 
 # ---------- Forward 기능 ----------
+
+def set_forward_direct_message(acc_name: str, message: str) -> None:
+    state = read_state()
+    fc = state.setdefault("forward_config", {})
+    accounts = fc.setdefault("accounts", {})
+    acc = accounts.get(acc_name) or _empty_forward_account()
+    acc["direct_message"] = message.strip()
+    accounts[acc_name] = acc
+    fc["updated_at"] = datetime.now(timezone.utc).isoformat()
+    write_state(state)
+
 
 def set_forward_config_account(acc_name: str, source_link: str, message_id: int) -> None:
     state = read_state()

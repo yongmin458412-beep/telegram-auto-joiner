@@ -181,6 +181,18 @@
           {% endif %}
         {% endif %}
       </div>
+      <hr style="border:0;border-top:1px dashed #ddd;margin:0.5rem 0;">
+      <form action="/forward/direct/{{ a.name }}" method="post">
+        <div style="font-size:0.8rem;font-weight:600;margin-bottom:0.25rem;">
+          직접 메시지 입력 {% if a.direct_message %}<span style="color:#28a745;">✓ 사용중</span>{% endif %}
+        </div>
+        <textarea name="direct_message" placeholder="직접 보낼 메시지 입력 (비어있으면 위 채널 forward 사용)"
+                  style="width:100%;min-height:60px;padding:0.3rem;border:1px solid #ccc;border-radius:3px;font-size:0.78rem;resize:vertical;">{{ a.direct_message }}</textarea>
+        <button type="submit" class="ghost" style="width:100%;margin-top:0.25rem;">직접 메시지 저장</button>
+      </form>
+      <div style="font-size:0.7rem;color:#888;margin-top:0.25rem;">
+        직접 메시지가 입력되면 forward 대신 이 텍스트를 send_message로 전송. forward 제한 우회.
+      </div>
     </div>
     {% endfor %}
   </div>

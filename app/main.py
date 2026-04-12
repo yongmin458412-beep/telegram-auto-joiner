@@ -227,6 +227,7 @@ async def index(request: Request, _: str = Depends(auth)):
             "source_accessible": fc_acc.get("source_accessible", False),
             "source_last_check": fc_acc.get("last_check"),
             "source_last_check_error": fc_acc.get("last_check_error"),
+            "direct_message": fc_acc.get("direct_message", ""),
         })
 
     global_fw = len(state["stats"].get("global_floodwait_events", []))
@@ -304,6 +305,17 @@ async def forward_config_account(
         log.info("Forward config saved for account %s", acc_name)
     else:
         log.warning("Forward config rejected for account %s (empty)", acc_name)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/forward/direct/{acc_name}")
+async def forward_direct_message(
+    acc_name: str,
+    direct_message: str = Form(""),
+    _: str = Depends(auth),
+):
+    storage.set_forward_direct_message(acc_name, direct_message)
+    log.info("Direct message saved for account %s (%d chars)", acc_name, len(direct_message.strip()))
     return RedirectResponse("/", status_code=303)
 
 

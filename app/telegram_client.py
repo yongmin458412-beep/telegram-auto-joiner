@@ -297,3 +297,53 @@ async def forward_and_counter(
         return True, f"forwarded, counter: {type(e).__name__}: {e}", None, False
 
     return True, None, None, False
+
+
+async def send_direct_and_counter(
+    account_name: str,
+    target_link: str,
+    message_text: str,
+    counter_text: str,
+) -> tuple[bool, Optional[str], Optional[int], bool]:
+    """직접 텍스트 메시지 전송 + 카운터 메시지.
+
+    forward 대신 send_message 사용 — forward 제한에 영향 안 받음.
+    Returns: (ok, error, flood_wait_seconds, disable_group)
+    """
+    client = await get_client(account_name)
+
+    try:
+        target_entity = await client.get_entity(target_link)
+    except FloodWaitError as e:
+        return False, f"flood wait {e.seconds}s (resolve target)", int(e.seconds), False
+    except Exception as e:
+        return False, f"resolve target: {type(e).__name__}: {e}", None, False
+
+    # 1) 직접 메시지 전송
+    try:
+        await client.send_message(target_entity, message_text)
+    except FloodWaitError as e:
+        return False, f"flood wait {e.seconds}s (send)", int(e.seconds), False
+    except (ChatWriteForbiddenError, UserBannedInChannelError, ChatAdminRequiredError):
+        return False, "write forbidden / banned / admin required", None, True
+    except ChatForwardsRestrictedError:
+        return False, "target group restricted", None, True
+    except SlowModeWaitError as e:
+        return False, f"slow mode {e.seconds}s", int(e.seconds), False
+    except Exception as e:
+        return False, f"send: {type(e).__name__}: {e}", None, False
+
+    # 2) 짧은 대기 후 카운터 메시지
+    await asyncio.sleep(1.5)
+    try:
+        await client.send_message(target_entity, counter_text)
+    except FloodWaitError as e:
+        return True, f"sent, counter flood wait {e.seconds}s", int(e.seconds), False
+    except (ChatWriteForbiddenError, UserBannedInChannelError, ChatAdminRequiredError):
+        return True, "sent, counter write forbidden", None, False
+    except SlowModeWaitError as e:
+        return True, f"sent, counter slow mode {e.seconds}s", int(e.seconds), False
+    except Exception as e:
+        return True, f"sent, counter: {type(e).__name__}: {e}", None, False
+
+    return True, None, None, False

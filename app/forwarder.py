@@ -12,7 +12,7 @@ import random
 from datetime import datetime, timedelta, timezone
 
 from . import storage
-from .telegram_client import forward_and_counter, resolve_source_channel
+from .telegram_client import forward_and_counter, resolve_source_channel, send_direct_and_counter
 
 log = logging.getLogger("forwarder")
 
@@ -91,7 +91,11 @@ async def resolve_source_all(account_names: list[str]) -> dict[str, dict]:
 
 
 async def _forward_one_group(
-    group_id: str, account_name: str, source_link: str, source_msg_id: int
+    group_id: str,
+    account_name: str,
+    source_link: str,
+    source_msg_id: int,
+    direct_message: str = "",
 ) -> bool:
     """단일 그룹에 대해 forward + counter 메시지 전송 + 결과 기록.
 
@@ -115,17 +119,27 @@ async def _forward_one_group(
     next_count = current_count + 1
     counter_text = f"{next_count}회"
 
+    use_direct = bool(direct_message)
+    mode = "direct" if use_direct else "forward"
     log.info(
-        "[%s] Forwarding to %s (round target, count -> %d)",
-        account_name, g["link"], next_count,
+        "[%s] %s to %s (count -> %d)",
+        account_name, mode.upper(), g["link"], next_count,
     )
-    ok, err, flood, disable = await forward_and_counter(
-        account_name=account_name,
-        target_link=g["link"],
-        source_link=source_link,
-        source_message_id=source_msg_id,
-        counter_text=counter_text,
-    )
+    if use_direct:
+        ok, err, flood, disable = await send_direct_and_counter(
+            account_name=account_name,
+            target_link=g["link"],
+            message_text=direct_message,
+            counter_text=counter_text,
+        )
+    else:
+        ok, err, flood, disable = await forward_and_counter(
+            account_name=account_name,
+            target_link=g["link"],
+            source_link=source_link,
+            source_message_id=source_msg_id,
+            counter_text=counter_text,
+        )
 
     if flood is not None:
         state = storage.read_state()
@@ -261,16 +275,20 @@ async def run_forward_worker(account_name: str) -> None:
                 await _sleep(3600)
                 continue
 
-            # 계정 소스 확인
+            # 계정 소스/메시지 확인
             acc_cfg = fc.get("accounts", {}).get(account_name)
-            if not acc_cfg or not acc_cfg.get("source_accessible"):
+            if not acc_cfg:
                 await _sleep(120)
                 continue
+            direct_message = (acc_cfg.get("direct_message") or "").strip()
             source_link = acc_cfg.get("source_link", "")
             source_msg_id = acc_cfg.get("source_message_id")
-            if not source_link or not source_msg_id:
-                await _sleep(120)
-                continue
+            # direct_message 또는 (source_link + source_msg_id + accessible) 필요
+            use_direct = bool(direct_message)
+            if not use_direct:
+                if not acc_cfg.get("source_accessible") or not source_link or not source_msg_id:
+                    await _sleep(120)
+                    continue
 
             # 현재 라운드 상태 체크
             remaining = acc.get("forward_current_round_remaining", [])
@@ -314,7 +332,8 @@ async def run_forward_worker(account_name: str) -> None:
                 continue
 
             forwarded_ok = await _forward_one_group(
-                gid, account_name, source_link, source_msg_id
+                gid, account_name, source_link, source_msg_id,
+                direct_message=direct_message,
             )
 
             # 라운드가 끝났는지 확인
