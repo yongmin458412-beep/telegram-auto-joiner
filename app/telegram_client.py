@@ -11,6 +11,8 @@ from telethon import TelegramClient
 from telethon.errors import (
     ChannelsTooMuchError,
     ChannelPrivateError,
+    ChatAdminRequiredError,
+    ChatForwardsRestrictedError,
     ChatWriteForbiddenError,
     FloodWaitError,
     InviteHashExpiredError,
@@ -266,8 +268,10 @@ async def forward_and_counter(
         )
     except FloodWaitError as e:
         return False, f"flood wait {e.seconds}s (forward)", int(e.seconds), False
-    except (ChatWriteForbiddenError, UserBannedInChannelError):
-        return False, "write forbidden / banned", None, True
+    except (ChatWriteForbiddenError, UserBannedInChannelError, ChatAdminRequiredError):
+        return False, "write forbidden / banned / admin required", None, True
+    except ChatForwardsRestrictedError:
+        return False, "source channel has forwarding restricted (disable in channel settings)", None, False
     except SlowModeWaitError as e:
         return False, f"slow mode {e.seconds}s", int(e.seconds), False
     except MessageIdInvalidError:
@@ -276,7 +280,6 @@ async def forward_and_counter(
         return False, "source channel private", None, False
     except Exception as e:
         msg = f"forward: {type(e).__name__}: {e}"
-        # 소스 관련 에러 경향 감지
         return False, msg, None, False
 
     # 2) 짧은 대기 후 카운터 메시지
