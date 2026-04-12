@@ -132,6 +132,16 @@ async def lifespan(app: FastAPI):
     )
     connected = [name for name, ok, _err in connect_results if ok]
 
+    # 연결된 계정들로 소스 채널 자동 resolve (가입)
+    if connected:
+        try:
+            log.info("Auto-resolving source channels for %d accounts...", len(connected))
+            resolve_results = await forwarder.resolve_source_all(connected)
+            for name, res in resolve_results.items():
+                log.info("[%s] source resolve: %s", name, res)
+        except Exception as e:
+            log.error("Source auto-resolve failed: %s", e)
+
     if not connected:
         log.error("No Telegram clients connected. Workers will not start.")
     else:

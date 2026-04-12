@@ -271,7 +271,7 @@ async def forward_and_counter(
     except (ChatWriteForbiddenError, UserBannedInChannelError, ChatAdminRequiredError):
         return False, "write forbidden / banned / admin required", None, True
     except ChatForwardsRestrictedError:
-        return False, "source channel has forwarding restricted (disable in channel settings)", None, False
+        return False, "target group has forwarding restricted", None, True
     except SlowModeWaitError as e:
         return False, f"slow mode {e.seconds}s", int(e.seconds), False
     except MessageIdInvalidError:
