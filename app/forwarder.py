@@ -184,16 +184,22 @@ async def _forward_one_group(
                 account_name, g["link"], err,
             )
         else:
-            storage.record_forward_error(group_id, err or "unknown", disable=False)
-            log.warning(
-                "[%s] Forward FAIL: %s err=%s",
-                account_name, g["link"], err,
+            err_lower = (err or "").lower()
+            target_gone = (
+                "usernameinvalid" in err_lower
+                or "usernamenotoccupied" in err_lower
+                or "nobody is using" in err_lower
+                or "chatinvalid" in err_lower
+                or "chatrestricted" in err_lower
             )
-            if err and (
-                "source message id invalid" in err
-                or "source channel private" in err
-            ):
-                storage.set_source_resolved(account_name, None, False, err)
+            if target_gone:
+                storage.delete_group(group_id)
+                log.warning("[%s] Forward FAIL & DELETED (target gone): %s err=%s", account_name, g["link"], err)
+            else:
+                storage.record_forward_error(group_id, err or "unknown", disable=False)
+                log.warning("[%s] Forward FAIL: %s err=%s", account_name, g["link"], err)
+                if err and ("source message id invalid" in err or "source channel private" in err):
+                    storage.set_source_resolved(account_name, None, False, err)
         return False
 
 

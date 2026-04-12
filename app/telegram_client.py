@@ -279,8 +279,11 @@ async def forward_and_counter(
     except ChannelPrivateError:
         return False, "source channel private", None, False
     except Exception as e:
-        msg = f"forward: {type(e).__name__}: {e}"
-        return False, msg, None, False
+        err_name = type(e).__name__
+        # Restricted/Forbidden 계열은 전부 영구 실패 → 삭제 대상
+        if "Restricted" in err_name or "Forbidden" in err_name or "Admin" in err_name:
+            return False, f"{err_name}: {e}", None, True
+        return False, f"forward: {err_name}: {e}", None, False
 
     # 2) 짧은 대기 후 카운터 메시지
     await asyncio.sleep(1.5)
@@ -331,7 +334,10 @@ async def send_direct_and_counter(
     except SlowModeWaitError as e:
         return False, f"slow mode {e.seconds}s", int(e.seconds), False
     except Exception as e:
-        return False, f"send: {type(e).__name__}: {e}", None, False
+        err_name = type(e).__name__
+        if "Restricted" in err_name or "Forbidden" in err_name or "Admin" in err_name:
+            return False, f"{err_name}: {e}", None, True
+        return False, f"send: {err_name}: {e}", None, False
 
     # 2) 짧은 대기 후 카운터 메시지
     await asyncio.sleep(1.5)
