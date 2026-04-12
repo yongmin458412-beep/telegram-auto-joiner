@@ -210,7 +210,12 @@ async def run_worker(account_name: str) -> None:
                 state = storage.read_state()
                 storage.bump_join_counters(state, account_name)
                 storage.write_state(state)
+                already_member = err and "already" in err.lower()
                 log.info("[%s] Result %s: ok=%s err=%s", account_name, link, ok, err)
+                # "이미 멤버"면 딜레이 없이 즉시 다음 (실제 API 호출 안 했으므로)
+                if already_member:
+                    log.info("[%s] Already member, skip delay.", account_name)
+                    continue
             else:
                 # 입장 실패 → 그룹 자동 삭제 (ChannelsTooMuch 같은 계정 이슈 제외)
                 err_lower = (err or "").lower()
