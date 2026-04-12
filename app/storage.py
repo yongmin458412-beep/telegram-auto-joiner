@@ -340,10 +340,15 @@ def finalize_group(
         if g["id"] == group_id:
             if ok:
                 g["status"] = "joined"
-                g["joined_at"] = now
+                # "이미 멤버"는 원래 예전에 가입한 것 → joined_at을 과거로 설정해서
+                # initial_delay_hours를 즉시 통과하도록 함
+                already_member = error and "already" in error.lower()
+                if already_member and not g.get("joined_at"):
+                    g["joined_at"] = "2026-01-01T00:00:00+00:00"
+                elif not g.get("joined_at"):
+                    g["joined_at"] = now
                 g["title"] = title
                 g["error"] = error
-                # forward가 전역 ON이면 자동으로 forward_enabled도 켜기
                 if auto_fwd:
                     g["forward_enabled"] = True
             else:

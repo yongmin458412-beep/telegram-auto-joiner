@@ -117,9 +117,14 @@ async def lifespan(app: FastAPI):
             if g.get("last_forward_error"):
                 g["last_forward_error"] = None
                 reset_count += 1
-            if g.get("status") == "joined" and fc_enabled and not g.get("forward_enabled"):
-                g["forward_enabled"] = True
-                auto_fwd_count += 1
+            if g.get("status") == "joined":
+                if fc_enabled and not g.get("forward_enabled"):
+                    g["forward_enabled"] = True
+                    auto_fwd_count += 1
+                # 최근 joined_at이면 과거로 조정 (initial_delay 즉시 통과)
+                ja = g.get("joined_at", "")
+                if ja and ja > "2026-04-12":
+                    g["joined_at"] = "2026-01-01T00:00:00+00:00"
         storage.write_state(state_fwd)
         log.info(
             "Startup cleanup: deleted %d failed, reset %d fwd errors, auto-enabled %d fwd.",
